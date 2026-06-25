@@ -1,0 +1,25 @@
+# Node modules
+node_modules/
+
+# Database files
+*.db
+*.db-journal
+
+# Uploads folder
+uploads/
+
+# Environment files
+.env
+*.env
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
