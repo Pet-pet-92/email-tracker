@@ -544,27 +544,48 @@ app.delete('/api/recipients/:email', async (req, res) => {
 });
 
 // DELETE all recipients
+// DELETE all recipients - FIXED
 app.delete('/api/recipients/all', async (req, res) => {
   try {
-    await query(`DELETE FROM recipients`);
+    // ✅ DELETE ALL CLICKS FIRST
     await query(`DELETE FROM clicks`);
+    
+    // ✅ THEN DELETE ALL RECIPIENTS
+    await query(`DELETE FROM recipients`);
+    
     res.json({ success: true, message: 'All recipients deleted successfully' });
   } catch (error) {
+    console.error('❌ Error deleting all recipients:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // DELETE sent recipients only
+// DELETE sent recipients only - FIXED
 app.delete('/api/recipients/sent', async (req, res) => {
   try {
+    // Get emails of sent recipients
+    const sentResult = await query(`SELECT email FROM recipients WHERE sent_at IS NOT NULL`);
+    const emails = sentResult.rows.map(r => r.email);
+    
+    if (emails.length === 0) {
+      return res.json({ success: true, message: 'No sent recipients to delete' });
+    }
+    
+    // ✅ DELETE CLICKS FOR SENT RECIPIENTS FIRST
+    await query(`DELETE FROM clicks WHERE email = ANY($1)`, [emails]);
+    
+    // ✅ THEN DELETE THE SENT RECIPIENTS
     await query(`DELETE FROM recipients WHERE sent_at IS NOT NULL`);
+    
     res.json({ success: true, message: 'Sent recipients deleted successfully' });
   } catch (error) {
+    console.error('❌ Error deleting sent recipients:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// DEBUG: Check all recipients
+//  Check all recipients
 app.get('/debug/recipients', async (req, res) => {
   try {
     const result = await query(`SELECT id, email, link FROM recipients`);
