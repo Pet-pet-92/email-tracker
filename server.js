@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const multer = require('multer');
 const fs = require('fs');
-const csv = require('csv-parser');
+//const csv = require('csv-parser');
 const app = express();
 
 // JSON parsing
@@ -337,86 +337,82 @@ app.post('/api/recipients', async (req, res) => {
 });
 
 // IMPORT CSV
+// IMPORT CSV - Using PapaParse
 app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
   
   try {
-    // Parse CSV from memory buffer
-    const results = [];
     const csvString = req.file.buffer.toString('utf8');
     
-    // Parse CSV using csv-parser from string
-    const parser = csv.parse({ columns: true });
+    // Parse CSV using PapaParse
+    const result = Papa.parse(csvString, {
+      header: true,
+      skipEmptyLines: true,
+      trimHeaders: true
+    });
     
-    // Create a readable stream from the string
-    const readableStream = require('stream').Readable;
-    const stream = new readableStream();
-    stream.push(csvString);
-    stream.push(null);
+    if (result.errors.length > 0) {
+      return res.status(400).json({ error: 'Error parsing CSV: ' + result.errors[0].message });
+    }
     
-    stream
-      .pipe(parser)
-      .on('data', (data) => {
-        const emailKey = Object.keys(data).find(key => key.toLowerCase() === 'email');
-        const nameKey = Object.keys(data).find(key => key.toLowerCase() === 'name' || key.toLowerCase() === 'firstname');
-        
-        if (emailKey) {
-          const email = data[emailKey];
-          const name = nameKey ? data[nameKey] : '';
-          if (email && email.trim()) {
-            results.push({ email: email.trim(), name: name.trim() });
-          }
-        }
-      })
-      .on('end', async () => {
-        if (results.length === 0) {
-          return res.status(400).json({ error: 'No valid emails found in CSV. Make sure there is an "email" column.' });
-        }
-        
-        let saved = 0;
-        let errors = 0;
-        
-        for (const person of results) {
-          try {
-            const uniqueId = crypto.randomBytes(16).toString('hex');
-            const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-            const link = `${baseUrl}/click/${uniqueId}`;
-
-            let name = person.name;
-            if (!name) {
-              name = person.email.split('@')[0];
-              name = name.replace(/[0-9]/g, '');
-              name = name.replace(/[._-]/g, ' ');
-              name = name.trim();
-              name = name.split(' ').map(word => 
-                word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-              ).join(' ');
-              if (!name) name = 'N/A';
-            }
-            
-            await query(
-              `INSERT INTO recipients (id, email, name, link, sent_at)
-               VALUES ($1, $2, $3, $4, NULL)
-               ON CONFLICT (email) DO NOTHING`,
-              [uniqueId, person.email, name, link]
-            );
-            saved++;
-          } catch (error) {
-            errors++;
-          }
-        }
-        
-        res.json({ 
-          success: true, 
-          message: `Imported ${saved} recipients, ${errors} skipped (duplicates or errors)` 
-        });
-      })
-      .on('error', (err) => {
-        res.status(500).json({ error: 'Error reading CSV file: ' + err.message });
-      });
+    const results = [];
+    result.data.forEach((row) => {
+      const emailKey = Object.keys(row).find(key => key.toLowerCase().trim() === 'email');
+      const nameKey = Object.keys(row).find(key => key.toLowerCase().trim() === 'name' || key.toLowerCase().trim() === 'firstname');
       
+      if (emailKey) {
+        const email = row[emailKey];
+        const name = nameKey ? row[nameKey] : '';
+        if (email && email.trim()) {
+          results.push({ email: email.trim(), name: name.trim() });
+        }
+      }
+    });
+    
+    if (results.length === 0) {
+      return res.status(400).json({ error: 'No valid emails found in CSV. Make sure there is an "email" column.' });
+    }
+    
+    let saved = 0;
+    let errors = 0;
+    
+    for (const person of results) {
+      try {
+        const uniqueId = crypto.randomBytes(16).toString('hex');
+        const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+        const link = `${baseUrl}/click/${uniqueId}`;
+
+        let name = person.name;
+        if (!name) {
+          name = person.email.split('@')[0];
+          name = name.replace(/[0-9]/g, '');
+          name = name.replace(/[._-]/g, ' ');
+          name = name.trim();
+          name = name.split(' ').map(word => 
+            word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+          ).join(' ');
+          if (!name) name = 'N/A';
+        }
+        
+        await query(
+          `INSERT INTO recipients (id, email, name, link, sent_at)
+           VALUES ($1, $2, $3, $4, NULL)
+           ON CONFLICT (email) DO NOTHING`,
+          [uniqueId, person.email, name, link]
+        );
+        saved++;
+      } catch (error) {
+        errors++;
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Imported ${saved} recipients, ${errors} skipped (duplicates or errors)` 
+    });
+    
   } catch (error) {
     res.status(500).json({ error: 'Error processing CSV: ' + error.message });
   }
