@@ -1098,14 +1098,22 @@ app.get('/clicked-link-page', (req, res) => {
 });
 
 // ============================================
-// START THE SERVER
+// START THE SERVER (For Local Development)
 // ============================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard`);
-  console.log(`📋 JSON data: http://localhost:${PORT}/results`);
-  console.log('\n📧 To send emails, use the "Send Emails" button in the dashboard.');
-});
 
-module.exports = { sendEmails };
+// For Vercel, we need to export the app
+// For local development, we listen on a port
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📊 Dashboard: http://localhost:${PORT}/dashboard`);
+    console.log(`📋 JSON data: http://localhost:${PORT}/results`);
+    console.log('\n📧 To send emails, use the "Send Emails" button in the dashboard.');
+  });
+}
+
+// ============================================
+// EXPORT FOR VERCEL
+// ============================================
+module.exports = app;  // ← This is what Vercel needs
