@@ -218,6 +218,13 @@ async function sendEmails(recipients, customSubject, customTemplate) {
 }
 
 // ============================================
+// ROOT ROUTE - Redirect to Dashboard
+// ============================================
+app.get('/', (req, res) => {
+  res.redirect('/dashboard');
+});
+
+// ============================================
 // TRACKING ENDPOINT
 // ============================================
 
