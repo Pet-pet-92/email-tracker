@@ -338,7 +338,7 @@ app.post('/api/recipients', async (req, res) => {
 });
 
 // IMPORT CSV
-// IMPORT CSV - Using PapaParse
+// IMPORT CSV - Using PapaParse (FIXED)
 app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
@@ -351,11 +351,16 @@ app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) =>
     const result = Papa.parse(csvString, {
       header: true,
       skipEmptyLines: true,
-      trimHeaders: true
+      trimHeaders: true,
+      delimiter: ','  // ← Explicitly tell it to use comma
     });
     
     if (result.errors.length > 0) {
-      return res.status(400).json({ error: 'Error parsing CSV: ' + result.errors[0].message });
+      // Check if it's just the auto-detect warning
+      const hasRealError = result.errors.some(e => e.code !== 'UndetectableDelimiter');
+      if (hasRealError) {
+        return res.status(400).json({ error: 'Error parsing CSV: ' + result.errors[0].message });
+      }
     }
     
     const results = [];
