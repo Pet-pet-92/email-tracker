@@ -545,7 +545,7 @@ app.get('/results', async (req, res) => {
 });
 
 // ============================================
-// DASHBOARD
+// DASHBOARD - WITH WORKING TABS
 // ============================================
 app.get('/dashboard', async (req, res) => {
   const statusFilter = req.query.status || 'all';
@@ -795,6 +795,9 @@ app.get('/dashboard', async (req, res) => {
   </div>
 
   <script>
+    // ============================================
+    // TAB SWITCHING FUNCTION
+    // ============================================
     function showTab(tabId) {
       var contents = document.querySelectorAll('.tab-content');
       for (var i = 0; i < contents.length; i++) {
@@ -822,6 +825,9 @@ app.get('/dashboard', async (req, res) => {
       }
     }
 
+    // ============================================
+    // SETTINGS FUNCTIONS
+    // ============================================
     async function loadSettings() {
       try {
         var response = await fetch('/api/settings');
@@ -899,6 +905,9 @@ app.get('/dashboard', async (req, res) => {
       }
     }
 
+    // ============================================
+    // RECIPIENT FUNCTIONS
+    // ============================================
     async function addRecipient(event) {
       event.preventDefault();
       var email = document.getElementById('emailInput').value;
@@ -1087,6 +1096,9 @@ app.get('/dashboard', async (req, res) => {
       } catch (error) { alert('Error: ' + error.message); }
     }
 
+    // ============================================
+    // SELECTION FUNCTIONS
+    // ============================================
     function updateSelectedCount() {
       var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
       var count = checkboxes.length;
