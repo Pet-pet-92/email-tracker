@@ -1005,62 +1005,61 @@ app.get('/dashboard', async (req, res) => {
       } catch (error) { statusEl.textContent = 'Error: ' + error.message; statusEl.className = 'import-status error'; }
     }
 
-    // ✅ FIXED loadRecipients() - No backslashes!
     async function loadRecipients() {
-      const container = document.getElementById('recipientList');
-      try {
-        const response = await fetch('/api/recipients');
-        const data = await response.json();
-        
-        if (data.length === 0) {
-          container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
-          const countEl = document.getElementById('selectedCount');
-          if (countEl) countEl.textContent = '0 selected';
-          return;
-        }
-        
-        let html = '';
-        html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
-        html += '<div style="overflow-x:auto;">';
-        html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
-        html += '<thead>';
-        html += '<tr style="background:#f8f9fa;">';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
-        html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
-        html += '</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
-        html += '</tr>';
-        html += '</thead>';
-        html += '<tbody>';
-        
-        for (var i = 0; i < data.length; i++) {
-          var row = data[i];
-          var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
-          var statusColor = row.sent_at ? '#28a745' : '#ff9800';
-          
-          html += '<tr style="border-bottom:1px solid #eee;">';
-          html += '<td style="padding:10px;">';
-          html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
-          html += '</td>';
-          html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
-          html += '<td style="padding:10px;">' + row.name + '</td>';
-          html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
-          html += '</tr>';
-        }
-        
-        html += '</tbody>';
-        html += '</table>';
-        html += '</div>';
-        
-        container.innerHTML = html;
-        updateSelectedCount();
-        
-      } catch (error) {
-        container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
-      }
+  const container = document.getElementById('recipientList');
+  try {
+    const response = await fetch('/api/recipients');
+    const data = await response.json();
+    
+    if (data.length === 0) {
+      container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
+      const countEl = document.getElementById('selectedCount');
+      if (countEl) countEl.textContent = '0 selected';
+      return;
     }
+    
+    let html = '';
+    html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
+    html += '<div style="overflow-x:auto;">';
+    html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
+    html += '<thead>';
+    html += '<tr style="background:#f8f9fa;">';
+    html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
+    html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
+    html += '</th>';
+    html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
+    html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
+    html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
+    html += '</tr>';
+    html += '</thead>';
+    html += '<tbody>';
+    
+    for (var i = 0; i < data.length; i++) {
+      var row = data[i];
+      var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
+      var statusColor = row.sent_at ? '#28a745' : '#ff9800';
+      
+      html += '<tr style="border-bottom:1px solid #eee;">';
+      html += '<td style="padding:10px;">';
+      html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
+      html += '</td>';
+      html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
+      html += '<td style="padding:10px;">' + row.name + '</td>';
+      html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
+      html += '</tr>';
+    }
+    
+    html += '</tbody>';
+    html += '</table>';
+    html += '</div>';
+    
+    container.innerHTML = html;
+    updateSelectedCount();
+    
+  } catch (error) {
+    container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
+  }
+}
 
     function downloadSampleCSV() {
       const content = 'email,name\\nalice@example.com,Alice\\nbob@example.com,Bob\\ncharlie@example.com,Charlie';
