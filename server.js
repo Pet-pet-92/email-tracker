@@ -528,51 +528,28 @@ app.post('/api/send-emails', async (req, res) => {
 // DELETE recipient
 app.delete('/api/recipients/:email', async (req, res) => {
   const { email } = req.params;
-  console.log(`🗑️ Deleting recipient: ${email}`);
-  
   try {
-    const clicksResult = await query(`DELETE FROM clicks WHERE email = $1`, [email]);
-    console.log(`✅ Deleted ${clicksResult.rowCount} clicks for ${email}`);
-    
-    const recipientResult = await query(`DELETE FROM recipients WHERE email = $1`, [email]);
-    
-    if (recipientResult.rowCount === 0) {
-      return res.status(404).json({ error: 'Recipient not found' });
-    }
-    
-    console.log(`✅ Deleted recipient: ${email}`);
-    res.json({ success: true, message: `Recipient ${email} deleted successfully` });
+    await query(`DELETE FROM clicks WHERE email = $1`, [email]);
+    await query(`DELETE FROM recipients WHERE email = $1`, [email]);
+    res.json({ success: true, message: 'Recipient deleted successfully' });
   } catch (error) {
-    console.error('❌ Error deleting recipient:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // DELETE all recipients
 app.delete('/api/recipients/all', async (req, res) => {
-  console.log('🗑️ Deleting ALL recipients...');
-  
   try {
-    const clicksResult = await query(`DELETE FROM clicks`);
-    console.log(`✅ Deleted ${clicksResult.rowCount} clicks`);
-    
-    const recipientsResult = await query(`DELETE FROM recipients`);
-    console.log(`✅ Deleted ${recipientsResult.rowCount} recipients`);
-    
-    res.json({ 
-      success: true, 
-      message: `Deleted ${recipientsResult.rowCount} recipients and ${clicksResult.rowCount} clicks` 
-    });
+    await query(`DELETE FROM clicks`);
+    await query(`DELETE FROM recipients`);
+    res.json({ success: true, message: 'All recipients deleted successfully' });
   } catch (error) {
-    console.error('❌ Error deleting all recipients:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // DELETE sent recipients only
 app.delete('/api/recipients/sent', async (req, res) => {
-  console.log('🗑️ Deleting SENT recipients...');
-  
   try {
     const sentResult = await query(`SELECT email FROM recipients WHERE sent_at IS NOT NULL`);
     const emails = sentResult.rows.map(r => r.email);
@@ -581,20 +558,10 @@ app.delete('/api/recipients/sent', async (req, res) => {
       return res.json({ success: true, message: 'No sent recipients to delete' });
     }
     
-    console.log(`📋 Found ${emails.length} sent recipients to delete`);
-    
-    const clicksResult = await query(`DELETE FROM clicks WHERE email = ANY($1)`, [emails]);
-    console.log(`✅ Deleted ${clicksResult.rowCount} clicks for sent recipients`);
-    
-    const recipientsResult = await query(`DELETE FROM recipients WHERE sent_at IS NOT NULL`);
-    console.log(`✅ Deleted ${recipientsResult.rowCount} sent recipients`);
-    
-    res.json({ 
-      success: true, 
-      message: `Deleted ${recipientsResult.rowCount} sent recipients and ${clicksResult.rowCount} clicks` 
-    });
+    await query(`DELETE FROM clicks WHERE email = ANY($1)`, [emails]);
+    await query(`DELETE FROM recipients WHERE sent_at IS NOT NULL`);
+    res.json({ success: true, message: 'Sent recipients deleted successfully' });
   } catch (error) {
-    console.error('❌ Error deleting sent recipients:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -633,7 +600,7 @@ app.get('/results', async (req, res) => {
 });
 
 // ============================================
-// DASHBOARD - WITH FIXED SCRIPT
+// DASHBOARD
 // ============================================
 app.get('/dashboard', async (req, res) => {
   const statusFilter = req.query.status || 'all';
@@ -643,17 +610,17 @@ app.get('/dashboard', async (req, res) => {
   let dateCondition = '';
   
   if (statusFilter === 'clicked') {
-    whereClause = 'HAVING click_count > 0';
+    whereClause = 'HAVING COUNT(c.id) > 0';
   } else if (statusFilter === 'not-clicked') {
-    whereClause = 'HAVING click_count = 0';
+    whereClause = 'HAVING COUNT(c.id) = 0';
   }
   
   if (dateFilter === 'today') {
-    dateCondition = "AND date(r.sent_at) = CURRENT_DATE";
+    dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE";
   } else if (dateFilter === 'yesterday') {
-    dateCondition = "AND date(r.sent_at) = CURRENT_DATE - INTERVAL '1 day'";
+    dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE - INTERVAL '1 day'";
   } else if (dateFilter === 'week') {
-    dateCondition = "AND date(r.sent_at) >= CURRENT_DATE - INTERVAL '7 days'";
+    dateCondition = "AND DATE(r.sent_at) >= CURRENT_DATE - INTERVAL '7 days'";
   }
   
   const queryText = `
