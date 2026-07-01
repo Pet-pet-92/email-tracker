@@ -25,7 +25,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Test the connection
 pool.connect((err, client, release) => {
   if (err) {
     console.error('❌ Error connecting to PostgreSQL:', err.stack);
@@ -36,7 +35,6 @@ pool.connect((err, client, release) => {
   }
 });
 
-// Helper function to run queries
 async function query(text, params) {
   const start = Date.now();
   const res = await pool.query(text, params);
@@ -105,7 +103,7 @@ async function createTables() {
 createTables();
 
 // ============================================
-// GENERATE UNIQUE LINKS FOR RECIPIENTS
+// GENERATE UNIQUE LINKS
 // ============================================
 
 function generateLinks(recipients) {
@@ -138,7 +136,7 @@ function generateLinks(recipients) {
 }
 
 // ============================================
-// SEND EMAILS FUNCTION
+// SEND EMAILS
 // ============================================
 
 async function sendEmails(recipients, customSubject, customTemplate) {
@@ -198,12 +196,7 @@ async function sendEmails(recipients, customSubject, customTemplate) {
 
     try {
       await transporter.sendMail(mailOptions);
-      
-      await query(
-        `UPDATE recipients SET sent_at = NOW() WHERE email = $1`,
-        [person.email]
-      );
-      
+      await query(`UPDATE recipients SET sent_at = NOW() WHERE email = $1`, [person.email]);
       sentEmails.push({ email: person.email, status: 'sent' });
       console.log(`✅ Email sent to ${person.email}`);
     } catch (error) {
@@ -217,16 +210,14 @@ async function sendEmails(recipients, customSubject, customTemplate) {
 }
 
 // ============================================
-// ROOT ROUTE - Redirect to Dashboard
+// ROUTES
 // ============================================
+
 app.get('/', (req, res) => {
   res.redirect('/dashboard');
 });
 
-// ============================================
-// TRACKING ENDPOINT
-// ============================================
-
+// TRACKING
 app.get('/click/:id', async (req, res) => {
   const { id } = req.params;
   console.log('🔍 Looking for ID:', id);
@@ -234,26 +225,12 @@ app.get('/click/:id', async (req, res) => {
   const ip = req.ip || req.connection.remoteAddress || 'Unknown';
 
   try {
-    const result = await query(
-      `SELECT email, name FROM recipients WHERE id = $1`,
-      [id]
-    );
+    const result = await query(`SELECT email, name FROM recipients WHERE id = $1`, [id]);
     const row = result.rows[0];
-    console.log('📊 Database result:', row);
 
     if (!row) {
       console.log('❌ ID not found in database!');
-      return res.status(404).send(`
-        <!DOCTYPE html>
-        <html>
-        <head><title>Invalid Link</title></head>
-        <body style="font-family:Arial;text-align:center;padding:50px;">
-          <h2>⚠️ Invalid or Expired Link</h2>
-          <p>The link you clicked is invalid or has expired.</p>
-          <p>Please contact the sender for a new link.</p>
-        </body>
-        </html>
-      `);
+      return res.status(404).send('Invalid or expired link');
     }
 
     await query(
@@ -263,7 +240,6 @@ app.get('/click/:id', async (req, res) => {
     );
 
     console.log(`✅ CLICK: ${row.email} clicked their link!`);
-
     res.redirect(`/clicked-link-page?email=${encodeURIComponent(row.email)}&name=${encodeURIComponent(row.name)}`);
   } catch (error) {
     console.error('❌ Error in tracking:', error);
@@ -271,25 +247,16 @@ app.get('/click/:id', async (req, res) => {
   }
 });
 
-// ============================================
 // API ENDPOINTS
-// ============================================
-
-// GET all recipients
 app.get('/api/recipients', async (req, res) => {
   try {
-    const result = await query(`
-      SELECT email, name, sent_at
-      FROM recipients
-      ORDER BY sent_at DESC
-    `);
+    const result = await query(`SELECT email, name, sent_at FROM recipients ORDER BY sent_at DESC`);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// ADD recipient manually
 app.post('/api/recipients', async (req, res) => {
   const { email, name } = req.body;
   
@@ -298,11 +265,7 @@ app.post('/api/recipients', async (req, res) => {
   }
   
   try {
-    const existing = await query(
-      `SELECT * FROM recipients WHERE email = $1`,
-      [email]
-    );
-    
+    const existing = await query(`SELECT * FROM recipients WHERE email = $1`, [email]);
     if (existing.rows.length > 0) {
       return res.status(400).json({ error: 'Email already exists' });
     }
@@ -335,7 +298,6 @@ app.post('/api/recipients', async (req, res) => {
   }
 });
 
-// IMPORT CSV
 app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
@@ -343,7 +305,6 @@ app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) =>
   
   try {
     const csvString = req.file.buffer.toString('utf8');
-    
     const result = Papa.parse(csvString, {
       header: true,
       skipEmptyLines: true,
@@ -419,7 +380,6 @@ app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) =>
   }
 });
 
-// GET settings
 app.get('/api/settings', async (req, res) => {
   try {
     const result = await query(`SELECT * FROM settings ORDER BY id DESC LIMIT 1`);
@@ -429,7 +389,6 @@ app.get('/api/settings', async (req, res) => {
   }
 });
 
-// UPDATE settings
 app.post('/api/settings', async (req, res) => {
   const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
   
@@ -455,7 +414,6 @@ app.post('/api/settings', async (req, res) => {
   }
 });
 
-// TEST SMTP connection
 app.post('/api/settings/test', async (req, res) => {
   const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
   
@@ -477,7 +435,6 @@ app.post('/api/settings/test', async (req, res) => {
   }
 });
 
-// SEND EMAILS
 app.post('/api/send-emails', async (req, res) => {
   const { subject, template } = req.body;
   
@@ -495,10 +452,7 @@ app.post('/api/send-emails', async (req, res) => {
     if (!hasLinks) {
       const trackingData = generateLinks(recipients);
       for (const person of trackingData) {
-        await query(
-          `UPDATE recipients SET link = $1 WHERE email = $2`,
-          [person.link, person.email]
-        );
+        await query(`UPDATE recipients SET link = $1 WHERE email = $2`, [person.link, person.email]);
       }
       console.log('✅ Links generated for all recipients');
     }
@@ -525,7 +479,6 @@ app.post('/api/send-emails', async (req, res) => {
   }
 });
 
-// DELETE recipient
 app.delete('/api/recipients/:email', async (req, res) => {
   const { email } = req.params;
   try {
@@ -537,7 +490,6 @@ app.delete('/api/recipients/:email', async (req, res) => {
   }
 });
 
-// DELETE all recipients
 app.delete('/api/recipients/all', async (req, res) => {
   try {
     await query(`DELETE FROM clicks`);
@@ -548,16 +500,13 @@ app.delete('/api/recipients/all', async (req, res) => {
   }
 });
 
-// DELETE sent recipients only
 app.delete('/api/recipients/sent', async (req, res) => {
   try {
     const sentResult = await query(`SELECT email FROM recipients WHERE sent_at IS NOT NULL`);
     const emails = sentResult.rows.map(r => r.email);
-    
     if (emails.length === 0) {
       return res.json({ success: true, message: 'No sent recipients to delete' });
     }
-    
     await query(`DELETE FROM clicks WHERE email = ANY($1)`, [emails]);
     await query(`DELETE FROM recipients WHERE sent_at IS NOT NULL`);
     res.json({ success: true, message: 'Sent recipients deleted successfully' });
@@ -566,7 +515,6 @@ app.delete('/api/recipients/sent', async (req, res) => {
   }
 });
 
-// Check all recipients
 app.get('/debug/recipients', async (req, res) => {
   try {
     const result = await query(`SELECT id, email, link FROM recipients`);
@@ -576,9 +524,6 @@ app.get('/debug/recipients', async (req, res) => {
   }
 });
 
-// ============================================
-// RESULTS
-// ============================================
 app.get('/results', async (req, res) => {
   try {
     const result = await query(`
@@ -600,7 +545,7 @@ app.get('/results', async (req, res) => {
 });
 
 // ============================================
-// DASHBOARD
+// DASHBOARD (with working tabs)
 // ============================================
 app.get('/dashboard', async (req, res) => {
   const statusFilter = req.query.status || 'all';
@@ -659,8 +604,7 @@ app.get('/dashboard', async (req, res) => {
       <option value="week" ${dateFilter === 'week' ? 'selected' : ''}>Last 7 Days</option>
     `;
     
-    let html = `
-<!DOCTYPE html>
+    let html = `<!DOCTYPE html>
 <html>
 <head>
   <title>Email Tracking Dashboard</title>
@@ -749,7 +693,7 @@ app.get('/dashboard', async (req, res) => {
           <div class="no-results"><p>No recipients found</p><p style="font-size:14px;color:#aaa;">Go to the "Manage Recipients" tab to add emails.</p></div>
         ` : `
           <table>
-            <tr><th>Status</th><th>Email</th><th>Name</th><th>Sent At</th><th>Clicks</th><th>Last Click</th><th>Action</th></tr>
+            <tr><th>Status</th><th>Email</th><th>Name</th><th>Sent At</th><th>Clicks</th><th>Last Click</th></tr>
             ${rows.map(row => {
               const statusText = parseInt(row.click_count) > 0 ? 'Clicked' : 'Not Clicked';
               const statusClass = parseInt(row.click_count) > 0 ? 'status-clicked' : 'status-not-clicked';
@@ -763,7 +707,6 @@ app.get('/dashboard', async (req, res) => {
                   <td>${sentAt}</td>
                   <td>${row.click_count}</td>
                   <td>${lastClick}</td>
-                  <td><button onclick="deleteRecipient('${row.email}')" style="background:#dc3545;color:white;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;">Delete</button></td>
                 </tr>
               `;
             }).join('')}
@@ -854,418 +797,335 @@ app.get('/dashboard', async (req, res) => {
   </div>
 
   <script>
-  function showTab(tabId) {
-    var contents = document.querySelectorAll('.tab-content');
-    for (var i = 0; i < contents.length; i++) {
-      contents[i].classList.remove('active');
+    function showTab(tabId) {
+      var contents = document.querySelectorAll('.tab-content');
+      for (var i = 0; i < contents.length; i++) {
+        contents[i].classList.remove('active');
+      }
+      var tabs = document.querySelectorAll('.tab');
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].classList.remove('active');
+      }
+      var selectedContent = document.getElementById(tabId);
+      if (selectedContent) {
+        selectedContent.classList.add('active');
+      }
+      var buttons = document.querySelectorAll('.tab');
+      for (var i = 0; i < buttons.length; i++) {
+        if (buttons[i].getAttribute('onclick') && buttons[i].getAttribute('onclick').indexOf(tabId) !== -1) {
+          buttons[i].classList.add('active');
+        }
+      }
+      if (tabId === 'manage-tab') { loadRecipients(); }
+      if (tabId === 'settings-tab') { loadSettings(); }
     }
-    
-    var tabs = document.querySelectorAll('.tab');
-    for (var i = 0; i < tabs.length; i++) {
-      tabs[i].classList.remove('active');
-    }
-    
-    var selectedContent = document.getElementById(tabId);
-    if (selectedContent) {
-      selectedContent.classList.add('active');
-    }
-    
-    var buttons = document.querySelectorAll('.tab');
-    for (var i = 0; i < buttons.length; i++) {
-      if (buttons[i].getAttribute('onclick') && buttons[i].getAttribute('onclick').indexOf(tabId) !== -1) {
-        buttons[i].classList.add('active');
+
+    async function loadSettings() {
+      try {
+        var response = await fetch('/api/settings');
+        var data = await response.json();
+        if (data) {
+          document.getElementById('smtpHost').value = data.smtp_host || '';
+          document.getElementById('smtpPort').value = data.smtp_port || 587;
+          document.getElementById('senderEmail').value = data.sender_email || '';
+          document.getElementById('senderPassword').value = data.sender_password || '';
+          document.getElementById('smtpSecure').value = data.smtp_secure || 0;
+        }
+      } catch (error) {
+        console.error('Error loading settings:', error);
       }
     }
-    
-    if (tabId === 'manage-tab') {
-      loadRecipients();
-    }
-    if (tabId === 'settings-tab') {
-      loadSettings();
-    }
-  }
 
-  async function loadSettings() {
-    try {
-      var response = await fetch('/api/settings');
-      var data = await response.json();
-      if (data) {
-        document.getElementById('smtpHost').value = data.smtp_host || '';
-        document.getElementById('smtpPort').value = data.smtp_port || 587;
-        document.getElementById('senderEmail').value = data.sender_email || '';
-        document.getElementById('senderPassword').value = data.sender_password || '';
-        document.getElementById('smtpSecure').value = data.smtp_secure || 0;
+    async function saveSettings(event) {
+      event.preventDefault();
+      var messageEl = document.getElementById('settingsMessage');
+      var settings = {
+        smtp_host: document.getElementById('smtpHost').value,
+        smtp_port: parseInt(document.getElementById('smtpPort').value),
+        smtp_secure: parseInt(document.getElementById('smtpSecure').value),
+        sender_email: document.getElementById('senderEmail').value,
+        sender_password: document.getElementById('senderPassword').value
+      };
+      try {
+        var response = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+        var data = await response.json();
+        if (response.ok) { messageEl.textContent = '✅ ' + data.message; messageEl.style.color = '#28a745'; }
+        else { messageEl.textContent = '❌ ' + data.error; messageEl.style.color = '#dc3545'; }
+      } catch (error) { messageEl.textContent = '❌ Error: ' + error.message; messageEl.style.color = '#dc3545'; }
+    }
+
+    async function testSettings() {
+      var messageEl = document.getElementById('settingsMessage');
+      messageEl.textContent = 'Testing connection...';
+      messageEl.style.color = '#007bff';
+      var settings = {
+        smtp_host: document.getElementById('smtpHost').value,
+        smtp_port: parseInt(document.getElementById('smtpPort').value),
+        smtp_secure: parseInt(document.getElementById('smtpSecure').value),
+        sender_email: document.getElementById('senderEmail').value,
+        sender_password: document.getElementById('senderPassword').value
+      };
+      try {
+        var response = await fetch('/api/settings/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+        var data = await response.json();
+        if (response.ok) { messageEl.textContent = '✅ ' + data.message; messageEl.style.color = '#28a745'; }
+        else { messageEl.textContent = '❌ ' + data.error; messageEl.style.color = '#dc3545'; }
+      } catch (error) { messageEl.textContent = '❌ Error: ' + error.message; messageEl.style.color = '#dc3545'; }
+    }
+
+    async function addRecipient(event) {
+      event.preventDefault();
+      var email = document.getElementById('emailInput').value;
+      var name = document.getElementById('nameInput').value;
+      var messageEl = document.getElementById('addMessage');
+      try {
+        var response = await fetch('/api/recipients', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email, name: name }) });
+        var data = await response.json();
+        if (response.ok) { messageEl.textContent = data.message; messageEl.className = 'message success'; document.getElementById('emailInput').value = ''; document.getElementById('nameInput').value = ''; loadRecipients(); }
+        else { messageEl.textContent = data.error; messageEl.className = 'message error'; }
+      } catch (error) { messageEl.textContent = 'Error: ' + error.message; messageEl.className = 'message error'; }
+    }
+
+    async function importCSV(event) {
+      event.preventDefault();
+      var fileInput = document.getElementById('csvFile');
+      var statusEl = document.getElementById('importStatus');
+      if (!fileInput.files.length) { statusEl.textContent = 'Please select a file'; statusEl.className = 'import-status error'; return; }
+      var formData = new FormData();
+      formData.append('csvFile', fileInput.files[0]);
+      try {
+        var response = await fetch('/api/recipients/import', { method: 'POST', body: formData });
+        var data = await response.json();
+        if (response.ok) { statusEl.textContent = data.message; statusEl.className = 'import-status success'; fileInput.value = ''; loadRecipients(); }
+        else { statusEl.textContent = data.error; statusEl.className = 'import-status error'; }
+      } catch (error) { statusEl.textContent = 'Error: ' + error.message; statusEl.className = 'import-status error'; }
+    }
+
+    async function loadRecipients() {
+      var container = document.getElementById('recipientList');
+      try {
+        var response = await fetch('/api/recipients');
+        var data = await response.json();
+        if (data.length === 0) {
+          container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
+          var countEl = document.getElementById('selectedCount');
+          if (countEl) countEl.textContent = '0 selected';
+          return;
+        }
+        var html = '';
+        html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
+        html += '<div style="overflow-x:auto;">';
+        html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
+        html += '<thead>';
+        html += '<tr style="background:#f8f9fa;">';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
+        html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
+        html += '</th>';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
+        html += '</tr>';
+        html += '</thead>';
+        html += '<tbody>';
+        for (var i = 0; i < data.length; i++) {
+          var row = data[i];
+          var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
+          var statusColor = row.sent_at ? '#28a745' : '#ff9800';
+          html += '<tr style="border-bottom:1px solid #eee;">';
+          html += '<td style="padding:10px;">';
+          html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
+          html += '</td>';
+          html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
+          html += '<td style="padding:10px;">' + row.name + '</td>';
+          html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
+          html += '</tr>';
+        }
+        html += '</tbody>';
+        html += '</table>';
+        html += '</div>';
+        container.innerHTML = html;
+        updateSelectedCount();
+      } catch (error) {
+        container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
       }
-    } catch (error) {
-      console.error('Error loading settings:', error);
     }
-  }
 
-  async function saveSettings(event) {
-    event.preventDefault();
-    var messageEl = document.getElementById('settingsMessage');
-    var settings = {
-      smtp_host: document.getElementById('smtpHost').value,
-      smtp_port: parseInt(document.getElementById('smtpPort').value),
-      smtp_secure: parseInt(document.getElementById('smtpSecure').value),
-      sender_email: document.getElementById('senderEmail').value,
-      sender_password: document.getElementById('senderPassword').value
-    };
-    try {
-      var response = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      });
-      var data = await response.json();
-      if (response.ok) {
-        messageEl.textContent = '✅ ' + data.message;
-        messageEl.style.color = '#28a745';
-      } else {
-        messageEl.textContent = '❌ ' + data.error;
-        messageEl.style.color = '#dc3545';
+    function downloadSampleCSV() {
+      var content = 'email,name\\nalice@example.com,Alice\\nbob@example.com,Bob\\ncharlie@example.com,Charlie';
+      var blob = new Blob([content], { type: 'text/csv' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'sample_recipients.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function sendEmails() {
+      var sendBtn = document.getElementById('sendBtn');
+      var statusEl = document.getElementById('sendStatus');
+      var progressEl = document.getElementById('sendProgress');
+      var subject = document.getElementById('emailSubject').value;
+      var template = document.getElementById('emailTemplate').value;
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Sending...';
+      statusEl.textContent = '';
+      statusEl.style.color = '#007bff';
+      progressEl.innerHTML = '';
+      try {
+        var response = await fetch('/api/send-emails', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject: subject, template: template }) });
+        var data = await response.json();
+        if (response.ok) {
+          statusEl.textContent = '✅ ' + data.message;
+          statusEl.style.color = '#28a745';
+          if (data.results) {
+            var html = '<div style="margin-top:10px;background:#f8f9fa;padding:10px;border-radius:5px;max-height:200px;overflow-y:auto;">';
+            html += '<table style="width:100%;font-size:13px;">';
+            html += '<tr><th>Email</th><th>Status</th></tr>';
+            for (var i = 0; i < data.results.length; i++) {
+              var result = data.results[i];
+              var color = result.status === 'sent' ? '#28a745' : '#dc3545';
+              html += '<tr><td>' + result.email + '</td><td style="color:' + color + ';font-weight:bold;">' + result.status + '</td></tr>';
+            }
+            html += '</table></div>';
+            progressEl.innerHTML = html;
+          }
+          loadRecipients();
+          setTimeout(function() { window.location.reload(); }, 3000);
+        } else {
+          statusEl.textContent = '❌ ' + data.error;
+          statusEl.style.color = '#dc3545';
+        }
+      } catch (error) {
+        statusEl.textContent = '❌ Error: ' + error.message;
+        statusEl.style.color = '#dc3545';
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Send Emails';
       }
-    } catch (error) {
-      messageEl.textContent = '❌ Error: ' + error.message;
-      messageEl.style.color = '#dc3545';
     }
-  }
 
-  async function testSettings() {
-    var messageEl = document.getElementById('settingsMessage');
-    messageEl.textContent = 'Testing connection...';
-    messageEl.style.color = '#007bff';
-    var settings = {
-      smtp_host: document.getElementById('smtpHost').value,
-      smtp_port: parseInt(document.getElementById('smtpPort').value),
-      smtp_secure: parseInt(document.getElementById('smtpSecure').value),
-      sender_email: document.getElementById('senderEmail').value,
-      sender_password: document.getElementById('senderPassword').value
-    };
-    try {
-      var response = await fetch('/api/settings/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      });
-      var data = await response.json();
-      if (response.ok) {
-        messageEl.textContent = '✅ ' + data.message;
-        messageEl.style.color = '#28a745';
-      } else {
-        messageEl.textContent = '❌ ' + data.error;
-        messageEl.style.color = '#dc3545';
+    async function deleteAllRecipients() {
+      if (!confirm('Delete ALL recipients? This cannot be undone.')) return;
+      try {
+        var response = await fetch('/api/recipients/all', { method: 'DELETE' });
+        var data = await response.json();
+        if (response.ok) { loadRecipients(); }
+        else { alert('Error: ' + data.error); }
+      } catch (error) { alert('Error: ' + error.message); }
+    }
+
+    async function deleteAllSent() {
+      if (!confirm('Delete all recipients that have been sent?')) return;
+      try {
+        var response = await fetch('/api/recipients/sent', { method: 'DELETE' });
+        var data = await response.json();
+        if (response.ok) { loadRecipients(); }
+        else { alert('Error: ' + data.error); }
+      } catch (error) { alert('Error: ' + error.message); }
+    }
+
+    function updateSelectedCount() {
+      var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
+      var count = checkboxes.length;
+      var countEl = document.getElementById('selectedCount');
+      if (countEl) countEl.textContent = count + ' selected';
+      var deleteBtn = document.getElementById('deleteSelectedBtn');
+      if (deleteBtn) {
+        deleteBtn.disabled = count === 0;
+        deleteBtn.style.opacity = count === 0 ? '0.5' : '1';
       }
-    } catch (error) {
-      messageEl.textContent = '❌ Error: ' + error.message;
-      messageEl.style.color = '#dc3545';
     }
-  }
 
-  async function addRecipient(event) {
-    event.preventDefault();
-    var email = document.getElementById('emailInput').value;
-    var name = document.getElementById('nameInput').value;
-    var messageEl = document.getElementById('addMessage');
-    try {
-      var response = await fetch('/api/recipients', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email, name: name })
-      });
-      var data = await response.json();
-      if (response.ok) {
-        messageEl.textContent = data.message;
-        messageEl.className = 'message success';
-        document.getElementById('emailInput').value = '';
-        document.getElementById('nameInput').value = '';
-        loadRecipients();
-      } else {
-        messageEl.textContent = data.error;
-        messageEl.className = 'message error';
+    function toggleAllCheckboxes() {
+      var masterCheckbox = document.getElementById('selectAllCheckbox');
+      var checkboxes = document.querySelectorAll('.recipient-checkbox');
+      for (var i = 0; i < checkboxes.length; i++) {
+        checkboxes[i].checked = masterCheckbox.checked;
       }
-    } catch (error) {
-      messageEl.textContent = 'Error: ' + error.message;
-      messageEl.className = 'message error';
+      updateSelectedCount();
     }
-  }
 
-  async function importCSV(event) {
-    event.preventDefault();
-    var fileInput = document.getElementById('csvFile');
-    var statusEl = document.getElementById('importStatus');
-    if (!fileInput.files.length) {
-      statusEl.textContent = 'Please select a file';
-      statusEl.className = 'import-status error';
-      return;
-    }
-    var formData = new FormData();
-    formData.append('csvFile', fileInput.files[0]);
-    try {
-      var response = await fetch('/api/recipients/import', {
-        method: 'POST',
-        body: formData
-      });
-      var data = await response.json();
-      if (response.ok) {
-        statusEl.textContent = data.message;
-        statusEl.className = 'import-status success';
-        fileInput.value = '';
-        loadRecipients();
-      } else {
-        statusEl.textContent = data.error;
-        statusEl.className = 'import-status error';
+    function selectAllRecipients() {
+      var checkboxes = document.querySelectorAll('.recipient-checkbox');
+      for (var i = 0; i < checkboxes.length; i++) {
+        checkboxes[i].checked = true;
       }
-    } catch (error) {
-      statusEl.textContent = 'Error: ' + error.message;
-      statusEl.className = 'import-status error';
+      var masterCheckbox = document.getElementById('selectAllCheckbox');
+      if (masterCheckbox) masterCheckbox.checked = true;
+      updateSelectedCount();
     }
-  }
 
-  async function loadRecipients() {
-    var container = document.getElementById('recipientList');
-    try {
-      var response = await fetch('/api/recipients');
-      var data = await response.json();
-      
-      if (data.length === 0) {
-        container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
-        var countEl = document.getElementById('selectedCount');
-        if (countEl) countEl.textContent = '0 selected';
+    function deselectAllRecipients() {
+      var checkboxes = document.querySelectorAll('.recipient-checkbox');
+      for (var i = 0; i < checkboxes.length; i++) {
+        checkboxes[i].checked = false;
+      }
+      var masterCheckbox = document.getElementById('selectAllCheckbox');
+      if (masterCheckbox) masterCheckbox.checked = false;
+      updateSelectedCount();
+    }
+
+    function getSelectedEmails() {
+      var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
+      var emails = [];
+      for (var i = 0; i < checkboxes.length; i++) {
+        emails.push(checkboxes[i].value);
+      }
+      return emails;
+    }
+
+    async function deleteSelectedRecipients() {
+      var selected = getSelectedEmails();
+      if (selected.length === 0) {
+        alert('Please select at least one recipient to delete.');
         return;
       }
-      
-      var html = '';
-      html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
-      html += '<div style="overflow-x:auto;">';
-      html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
-      html += '<thead>';
-      html += '<tr style="background:#f8f9fa;">';
-      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
-      html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
-      html += '</th>';
-      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
-      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
-      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
-      html += '</tr>';
-      html += '</thead>';
-      html += '<tbody>';
-      
-      for (var i = 0; i < data.length; i++) {
-        var row = data[i];
-        var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
-        var statusColor = row.sent_at ? '#28a745' : '#ff9800';
-        
-        html += '<tr style="border-bottom:1px solid #eee;">';
-        html += '<td style="padding:10px;">';
-        html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
-        html += '</td>';
-        html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
-        html += '<td style="padding:10px;">' + row.name + '</td>';
-        html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
-        html += '</tr>';
-      }
-      
-      html += '</tbody>';
-      html += '</table>';
-      html += '</div>';
-      
-      container.innerHTML = html;
-      updateSelectedCount();
-      
-    } catch (error) {
-      container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
-    }
-  }
-
-  function downloadSampleCSV() {
-    var content = 'email,name\\nalice@example.com,Alice\\nbob@example.com,Bob\\ncharlie@example.com,Charlie';
-    var blob = new Blob([content], { type: 'text/csv' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'sample_recipients.csv';
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function sendEmails() {
-    var sendBtn = document.getElementById('sendBtn');
-    var statusEl = document.getElementById('sendStatus');
-    var progressEl = document.getElementById('sendProgress');
-    var subject = document.getElementById('emailSubject').value;
-    var template = document.getElementById('emailTemplate').value;
-    sendBtn.disabled = true;
-    sendBtn.textContent = 'Sending...';
-    statusEl.textContent = '';
-    statusEl.style.color = '#007bff';
-    progressEl.innerHTML = '';
-    try {
-      var response = await fetch('/api/send-emails', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: subject, template: template })
-      });
-      var data = await response.json();
-      if (response.ok) {
-        statusEl.textContent = '✅ ' + data.message;
-        statusEl.style.color = '#28a745';
-        if (data.results) {
-          var html = '<div style="margin-top:10px;background:#f8f9fa;padding:10px;border-radius:5px;max-height:200px;overflow-y:auto;">';
-          html += '<table style="width:100%;font-size:13px;">';
-          html += '<tr><th>Email</th><th>Status</th></tr>';
-          for (var i = 0; i < data.results.length; i++) {
-            var result = data.results[i];
-            var color = result.status === 'sent' ? '#28a745' : '#dc3545';
-            html += '<tr><td>' + result.email + '</td><td style="color:' + color + ';font-weight:bold;">' + result.status + '</td></tr>';
+      if (!confirm('Delete ' + selected.length + ' selected recipient(s)? This cannot be undone.')) return;
+      var deleteBtn = document.getElementById('deleteSelectedBtn');
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = 'Deleting...';
+      try {
+        var deleted = 0;
+        var failed = 0;
+        var errorMessages = [];
+        for (var i = 0; i < selected.length; i++) {
+          var email = selected[i];
+          try {
+            var response = await fetch('/api/recipients/' + encodeURIComponent(email), { method: 'DELETE' });
+            var data = await response.json();
+            if (response.ok) { deleted++; } 
+            else { 
+              failed++; 
+              errorMessages.push(email + ': ' + (data.error || 'Unknown error'));
+            }
+          } catch (error) {
+            failed++;
+            errorMessages.push(email + ': ' + error.message);
           }
-          html += '</table></div>';
-          progressEl.innerHTML = html;
+        }
+        if (failed > 0) {
+          alert('⚠️ Deleted ' + deleted + ' recipient(s). ' + failed + ' failed.\n\nErrors:\n' + errorMessages.join('\n'));
+        } else {
+          alert('✅ Deleted ' + deleted + ' recipient(s) successfully.');
         }
         loadRecipients();
-        setTimeout(function() { window.location.reload(); }, 3000);
-      } else {
-        statusEl.textContent = '❌ ' + data.error;
-        statusEl.style.color = '#dc3545';
+      } catch (error) {
+        alert('❌ Error: ' + error.message);
+      } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = '🗑️ Delete Selected';
       }
-    } catch (error) {
-      statusEl.textContent = '❌ Error: ' + error.message;
-      statusEl.style.color = '#dc3545';
-    } finally {
-      sendBtn.disabled = false;
-      sendBtn.textContent = 'Send Emails';
     }
-  }
 
-  async function deleteAllRecipients() {
-    if (!confirm('Delete ALL recipients? This cannot be undone.')) return;
-    try {
-      var response = await fetch('/api/recipients/all', { method: 'DELETE' });
-      var data = await response.json();
-      if (response.ok) { loadRecipients(); }
-      else { alert('Error: ' + data.error); }
-    } catch (error) { alert('Error: ' + error.message); }
-  }
-
-  async function deleteAllSent() {
-    if (!confirm('Delete all recipients that have been sent?')) return;
-    try {
-      var response = await fetch('/api/recipients/sent', { method: 'DELETE' });
-      var data = await response.json();
-      if (response.ok) { loadRecipients(); }
-      else { alert('Error: ' + data.error); }
-    } catch (error) { alert('Error: ' + error.message); }
-  }
-
-  function updateSelectedCount() {
-    var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
-    var count = checkboxes.length;
-    var countEl = document.getElementById('selectedCount');
-    if (countEl) countEl.textContent = count + ' selected';
-    
-    var deleteBtn = document.getElementById('deleteSelectedBtn');
-    if (deleteBtn) {
-      deleteBtn.disabled = count === 0;
-      deleteBtn.style.opacity = count === 0 ? '0.5' : '1';
-    }
-  }
-
-  function toggleAllCheckboxes() {
-    var masterCheckbox = document.getElementById('selectAllCheckbox');
-    var checkboxes = document.querySelectorAll('.recipient-checkbox');
-    for (var i = 0; i < checkboxes.length; i++) {
-      checkboxes[i].checked = masterCheckbox.checked;
-    }
-    updateSelectedCount();
-  }
-
-  function selectAllRecipients() {
-    var checkboxes = document.querySelectorAll('.recipient-checkbox');
-    for (var i = 0; i < checkboxes.length; i++) {
-      checkboxes[i].checked = true;
-    }
-    var masterCheckbox = document.getElementById('selectAllCheckbox');
-    if (masterCheckbox) masterCheckbox.checked = true;
-    updateSelectedCount();
-  }
-
-  function deselectAllRecipients() {
-    var checkboxes = document.querySelectorAll('.recipient-checkbox');
-    for (var i = 0; i < checkboxes.length; i++) {
-      checkboxes[i].checked = false;
-    }
-    var masterCheckbox = document.getElementById('selectAllCheckbox');
-    if (masterCheckbox) masterCheckbox.checked = false;
-    updateSelectedCount();
-  }
-
-  function getSelectedEmails() {
-    var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
-    var emails = [];
-    for (var i = 0; i < checkboxes.length; i++) {
-      emails.push(checkboxes[i].value);
-    }
-    return emails;
-  }
-
-  async function deleteSelectedRecipients() {
-    var selected = getSelectedEmails();
-    if (selected.length === 0) {
-      alert('Please select at least one recipient to delete.');
-      return;
-    }
-    
-    if (!confirm('Delete ' + selected.length + ' selected recipient(s)? This cannot be undone.')) return;
-    
-    var deleteBtn = document.getElementById('deleteSelectedBtn');
-    deleteBtn.disabled = true;
-    deleteBtn.textContent = 'Deleting...';
-    
-    try {
-      var deleted = 0;
-      var failed = 0;
-      var errorMessages = [];
-      
-      for (var i = 0; i < selected.length; i++) {
-        var email = selected[i];
-        try {
-          var response = await fetch('/api/recipients/' + encodeURIComponent(email), { method: 'DELETE' });
-          var data = await response.json();
-          if (response.ok) { deleted++; } 
-          else { 
-            failed++; 
-            errorMessages.push(email + ': ' + (data.error || 'Unknown error'));
-          }
-        } catch (error) {
-          failed++;
-          errorMessages.push(email + ': ' + error.message);
-        }
-      }
-      
-      if (failed > 0) {
-        alert('⚠️ Deleted ' + deleted + ' recipient(s). ' + failed + ' failed.\n\nErrors:\n' + errorMessages.join('\n'));
-      } else {
-        alert('✅ Deleted ' + deleted + ' recipient(s) successfully.');
-      }
+    document.addEventListener('DOMContentLoaded', function() {
       loadRecipients();
-      
-    } catch (error) {
-      alert('❌ Error: ' + error.message);
-    } finally {
-      deleteBtn.disabled = false;
-      deleteBtn.textContent = '🗑️ Delete Selected';
-    }
-  }
-
-  document.addEventListener('DOMContentLoaded', function() {
-    loadRecipients();
-    loadSettings();
-  });
-</script>
+      loadSettings();
+    });
+  </script>
 </body>
-</html>
-    `;
-    
+</html>`;
+
     res.send(html);
   } catch (error) {
     res.send(`<h2>Error: ${error.message}</h2>`);
@@ -1343,7 +1203,4 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// ============================================
-// EXPORT FOR VERCEL
-// ============================================
 module.exports = app;
