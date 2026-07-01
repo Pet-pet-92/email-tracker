@@ -854,337 +854,414 @@ app.get('/dashboard', async (req, res) => {
   </div>
 
   <script>
-    function showTab(tabId) {
-      document.querySelectorAll('.tab-content').forEach(function(el) { el.classList.remove('active'); });
-      document.querySelectorAll('.tab').forEach(function(el) { el.classList.remove('active'); });
-      document.getElementById(tabId).classList.add('active');
-      var tabs = document.querySelectorAll('.tab');
-      for (var i = 0; i < tabs.length; i++) {
-        if (tabs[i].getAttribute('onclick').indexOf(tabId) !== -1) {
-          tabs[i].classList.add('active');
-        }
-      }
-      if (tabId === 'manage-tab') loadRecipients();
-      if (tabId === 'settings-tab') loadSettings();
+  function showTab(tabId) {
+    var contents = document.querySelectorAll('.tab-content');
+    for (var i = 0; i < contents.length; i++) {
+      contents[i].classList.remove('active');
     }
-
-    async function loadSettings() {
-      try {
-        var response = await fetch('/api/settings');
-        var data = await response.json();
-        if (data) {
-          document.getElementById('smtpHost').value = data.smtp_host || '';
-          document.getElementById('smtpPort').value = data.smtp_port || 587;
-          document.getElementById('senderEmail').value = data.sender_email || '';
-          document.getElementById('senderPassword').value = data.sender_password || '';
-          document.getElementById('smtpSecure').value = data.smtp_secure || 0;
-        }
-      } catch (error) {
-        console.error('Error loading settings:', error);
+    
+    var tabs = document.querySelectorAll('.tab');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].classList.remove('active');
+    }
+    
+    var selectedContent = document.getElementById(tabId);
+    if (selectedContent) {
+      selectedContent.classList.add('active');
+    }
+    
+    var buttons = document.querySelectorAll('.tab');
+    for (var i = 0; i < buttons.length; i++) {
+      if (buttons[i].getAttribute('onclick') && buttons[i].getAttribute('onclick').indexOf(tabId) !== -1) {
+        buttons[i].classList.add('active');
       }
     }
-
-    async function saveSettings(event) {
-      event.preventDefault();
-      var messageEl = document.getElementById('settingsMessage');
-      var settings = {
-        smtp_host: document.getElementById('smtpHost').value,
-        smtp_port: parseInt(document.getElementById('smtpPort').value),
-        smtp_secure: parseInt(document.getElementById('smtpSecure').value),
-        sender_email: document.getElementById('senderEmail').value,
-        sender_password: document.getElementById('senderPassword').value
-      };
-      try {
-        var response = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
-        var data = await response.json();
-        if (response.ok) { messageEl.textContent = '✅ ' + data.message; messageEl.style.color = '#28a745'; }
-        else { messageEl.textContent = '❌ ' + data.error; messageEl.style.color = '#dc3545'; }
-      } catch (error) { messageEl.textContent = '❌ Error: ' + error.message; messageEl.style.color = '#dc3545'; }
+    
+    if (tabId === 'manage-tab') {
+      loadRecipients();
     }
-
-    async function testSettings() {
-      var messageEl = document.getElementById('settingsMessage');
-      messageEl.textContent = 'Testing connection...';
-      messageEl.style.color = '#007bff';
-      var settings = {
-        smtp_host: document.getElementById('smtpHost').value,
-        smtp_port: parseInt(document.getElementById('smtpPort').value),
-        smtp_secure: parseInt(document.getElementById('smtpSecure').value),
-        sender_email: document.getElementById('senderEmail').value,
-        sender_password: document.getElementById('senderPassword').value
-      };
-      try {
-        var response = await fetch('/api/settings/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
-        var data = await response.json();
-        if (response.ok) { messageEl.textContent = '✅ ' + data.message; messageEl.style.color = '#28a745'; }
-        else { messageEl.textContent = '❌ ' + data.error; messageEl.style.color = '#dc3545'; }
-      } catch (error) { messageEl.textContent = '❌ Error: ' + error.message; messageEl.style.color = '#dc3545'; }
+    if (tabId === 'settings-tab') {
+      loadSettings();
     }
+  }
 
-    async function addRecipient(event) {
-      event.preventDefault();
-      var email = document.getElementById('emailInput').value;
-      var name = document.getElementById('nameInput').value;
-      var messageEl = document.getElementById('addMessage');
-      try {
-        var response = await fetch('/api/recipients', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email, name: name }) });
-        var data = await response.json();
-        if (response.ok) { messageEl.textContent = data.message; messageEl.className = 'message success'; document.getElementById('emailInput').value = ''; document.getElementById('nameInput').value = ''; loadRecipients(); }
-        else { messageEl.textContent = data.error; messageEl.className = 'message error'; }
-      } catch (error) { messageEl.textContent = 'Error: ' + error.message; messageEl.className = 'message error'; }
-    }
-
-    async function importCSV(event) {
-      event.preventDefault();
-      var fileInput = document.getElementById('csvFile');
-      var statusEl = document.getElementById('importStatus');
-      if (!fileInput.files.length) { statusEl.textContent = 'Please select a file'; statusEl.className = 'import-status error'; return; }
-      var formData = new FormData();
-      formData.append('csvFile', fileInput.files[0]);
-      try {
-        var response = await fetch('/api/recipients/import', { method: 'POST', body: formData });
-        var data = await response.json();
-        if (response.ok) { statusEl.textContent = data.message; statusEl.className = 'import-status success'; fileInput.value = ''; loadRecipients(); }
-        else { statusEl.textContent = data.error; statusEl.className = 'import-status error'; }
-      } catch (error) { statusEl.textContent = 'Error: ' + error.message; statusEl.className = 'import-status error'; }
-    }
-
-    async function loadRecipients() {
-      var container = document.getElementById('recipientList');
-      try {
-        var response = await fetch('/api/recipients');
-        var data = await response.json();
-        
-        if (data.length === 0) {
-          container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
-          var countEl = document.getElementById('selectedCount');
-          if (countEl) countEl.textContent = '0 selected';
-          return;
-        }
-        
-        var html = '';
-        html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
-        html += '<div style="overflow-x:auto;">';
-        html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
-        html += '<thead>';
-        html += '<tr style="background:#f8f9fa;">';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
-        html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
-        html += '</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
-        html += '</tr>';
-        html += '</thead>';
-        html += '<tbody>';
-        
-        for (var i = 0; i < data.length; i++) {
-          var row = data[i];
-          var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
-          var statusColor = row.sent_at ? '#28a745' : '#ff9800';
-          
-          html += '<tr style="border-bottom:1px solid #eee;">';
-          html += '<td style="padding:10px;">';
-          html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
-          html += '</td>';
-          html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
-          html += '<td style="padding:10px;">' + row.name + '</td>';
-          html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
-          html += '</tr>';
-        }
-        
-        html += '</tbody>';
-        html += '</table>';
-        html += '</div>';
-        
-        container.innerHTML = html;
-        updateSelectedCount();
-        
-      } catch (error) {
-        container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
+  async function loadSettings() {
+    try {
+      var response = await fetch('/api/settings');
+      var data = await response.json();
+      if (data) {
+        document.getElementById('smtpHost').value = data.smtp_host || '';
+        document.getElementById('smtpPort').value = data.smtp_port || 587;
+        document.getElementById('senderEmail').value = data.sender_email || '';
+        document.getElementById('senderPassword').value = data.sender_password || '';
+        document.getElementById('smtpSecure').value = data.smtp_secure || 0;
       }
+    } catch (error) {
+      console.error('Error loading settings:', error);
     }
+  }
 
-    function downloadSampleCSV() {
-      var content = 'email,name\\nalice@example.com,Alice\\nbob@example.com,Bob\\ncharlie@example.com,Charlie';
-      var blob = new Blob([content], { type: 'text/csv' });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = 'sample_recipients.csv';
-      a.click();
-      URL.revokeObjectURL(url);
-    }
-
-    async function sendEmails() {
-      var sendBtn = document.getElementById('sendBtn');
-      var statusEl = document.getElementById('sendStatus');
-      var progressEl = document.getElementById('sendProgress');
-      var subject = document.getElementById('emailSubject').value;
-      var template = document.getElementById('emailTemplate').value;
-      sendBtn.disabled = true;
-      sendBtn.textContent = 'Sending...';
-      statusEl.textContent = '';
-      statusEl.style.color = '#007bff';
-      progressEl.innerHTML = '';
-      try {
-        var response = await fetch('/api/send-emails', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject: subject, template: template }) });
-        var data = await response.json();
-        if (response.ok) {
-          statusEl.textContent = '✅ ' + data.message;
-          statusEl.style.color = '#28a745';
-          if (data.results) {
-            var html = '<div style="margin-top:10px;background:#f8f9fa;padding:10px;border-radius:5px;max-height:200px;overflow-y:auto;">';
-            html += '<table style="width:100%;font-size:13px;">';
-            html += '<tr><th>Email</th><th>Status</th></tr>';
-            for (var i = 0; i < data.results.length; i++) {
-              var result = data.results[i];
-              var color = result.status === 'sent' ? '#28a745' : '#dc3545';
-              html += '<tr><td>' + result.email + '</td><td style="color:' + color + ';font-weight:bold;">' + result.status + '</td></tr>';
-            }
-            html += '</table></div>';
-            progressEl.innerHTML = html;
-          }
-          loadRecipients();
-          setTimeout(function() { window.location.reload(); }, 3000);
-        } else {
-          statusEl.textContent = '❌ ' + data.error;
-          statusEl.style.color = '#dc3545';
-        }
-      } catch (error) {
-        statusEl.textContent = '❌ Error: ' + error.message;
-        statusEl.style.color = '#dc3545';
-      } finally {
-        sendBtn.disabled = false;
-        sendBtn.textContent = 'Send Emails';
+  async function saveSettings(event) {
+    event.preventDefault();
+    var messageEl = document.getElementById('settingsMessage');
+    var settings = {
+      smtp_host: document.getElementById('smtpHost').value,
+      smtp_port: parseInt(document.getElementById('smtpPort').value),
+      smtp_secure: parseInt(document.getElementById('smtpSecure').value),
+      sender_email: document.getElementById('senderEmail').value,
+      sender_password: document.getElementById('senderPassword').value
+    };
+    try {
+      var response = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      var data = await response.json();
+      if (response.ok) {
+        messageEl.textContent = '✅ ' + data.message;
+        messageEl.style.color = '#28a745';
+      } else {
+        messageEl.textContent = '❌ ' + data.error;
+        messageEl.style.color = '#dc3545';
       }
+    } catch (error) {
+      messageEl.textContent = '❌ Error: ' + error.message;
+      messageEl.style.color = '#dc3545';
     }
+  }
 
-    async function deleteAllRecipients() {
-      if (!confirm('Delete ALL recipients? This cannot be undone.')) return;
-      try {
-        var response = await fetch('/api/recipients/all', { method: 'DELETE' });
-        var data = await response.json();
-        if (response.ok) { loadRecipients(); }
-        else { alert('Error: ' + data.error); }
-      } catch (error) { alert('Error: ' + error.message); }
+  async function testSettings() {
+    var messageEl = document.getElementById('settingsMessage');
+    messageEl.textContent = 'Testing connection...';
+    messageEl.style.color = '#007bff';
+    var settings = {
+      smtp_host: document.getElementById('smtpHost').value,
+      smtp_port: parseInt(document.getElementById('smtpPort').value),
+      smtp_secure: parseInt(document.getElementById('smtpSecure').value),
+      sender_email: document.getElementById('senderEmail').value,
+      sender_password: document.getElementById('senderPassword').value
+    };
+    try {
+      var response = await fetch('/api/settings/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      var data = await response.json();
+      if (response.ok) {
+        messageEl.textContent = '✅ ' + data.message;
+        messageEl.style.color = '#28a745';
+      } else {
+        messageEl.textContent = '❌ ' + data.error;
+        messageEl.style.color = '#dc3545';
+      }
+    } catch (error) {
+      messageEl.textContent = '❌ Error: ' + error.message;
+      messageEl.style.color = '#dc3545';
     }
+  }
 
-    async function deleteAllSent() {
-      if (!confirm('Delete all recipients that have been sent?')) return;
-      try {
-        var response = await fetch('/api/recipients/sent', { method: 'DELETE' });
-        var data = await response.json();
-        if (response.ok) { loadRecipients(); }
-        else { alert('Error: ' + data.error); }
-      } catch (error) { alert('Error: ' + error.message); }
+  async function addRecipient(event) {
+    event.preventDefault();
+    var email = document.getElementById('emailInput').value;
+    var name = document.getElementById('nameInput').value;
+    var messageEl = document.getElementById('addMessage');
+    try {
+      var response = await fetch('/api/recipients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email, name: name })
+      });
+      var data = await response.json();
+      if (response.ok) {
+        messageEl.textContent = data.message;
+        messageEl.className = 'message success';
+        document.getElementById('emailInput').value = '';
+        document.getElementById('nameInput').value = '';
+        loadRecipients();
+      } else {
+        messageEl.textContent = data.error;
+        messageEl.className = 'message error';
+      }
+    } catch (error) {
+      messageEl.textContent = 'Error: ' + error.message;
+      messageEl.className = 'message error';
     }
+  }
 
-    function updateSelectedCount() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
-      var count = checkboxes.length;
-      var countEl = document.getElementById('selectedCount');
-      if (countEl) countEl.textContent = count + ' selected';
+  async function importCSV(event) {
+    event.preventDefault();
+    var fileInput = document.getElementById('csvFile');
+    var statusEl = document.getElementById('importStatus');
+    if (!fileInput.files.length) {
+      statusEl.textContent = 'Please select a file';
+      statusEl.className = 'import-status error';
+      return;
+    }
+    var formData = new FormData();
+    formData.append('csvFile', fileInput.files[0]);
+    try {
+      var response = await fetch('/api/recipients/import', {
+        method: 'POST',
+        body: formData
+      });
+      var data = await response.json();
+      if (response.ok) {
+        statusEl.textContent = data.message;
+        statusEl.className = 'import-status success';
+        fileInput.value = '';
+        loadRecipients();
+      } else {
+        statusEl.textContent = data.error;
+        statusEl.className = 'import-status error';
+      }
+    } catch (error) {
+      statusEl.textContent = 'Error: ' + error.message;
+      statusEl.className = 'import-status error';
+    }
+  }
+
+  async function loadRecipients() {
+    var container = document.getElementById('recipientList');
+    try {
+      var response = await fetch('/api/recipients');
+      var data = await response.json();
       
-      var deleteBtn = document.getElementById('deleteSelectedBtn');
-      if (deleteBtn) {
-        deleteBtn.disabled = count === 0;
-        deleteBtn.style.opacity = count === 0 ? '0.5' : '1';
-      }
-    }
-
-    function toggleAllCheckboxes() {
-      var masterCheckbox = document.getElementById('selectAllCheckbox');
-      var checkboxes = document.querySelectorAll('.recipient-checkbox');
-      for (var i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].checked = masterCheckbox.checked;
-      }
-      updateSelectedCount();
-    }
-
-    function selectAllRecipients() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox');
-      for (var i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].checked = true;
-      }
-      var masterCheckbox = document.getElementById('selectAllCheckbox');
-      if (masterCheckbox) masterCheckbox.checked = true;
-      updateSelectedCount();
-    }
-
-    function deselectAllRecipients() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox');
-      for (var i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].checked = false;
-      }
-      var masterCheckbox = document.getElementById('selectAllCheckbox');
-      if (masterCheckbox) masterCheckbox.checked = false;
-      updateSelectedCount();
-    }
-
-    function getSelectedEmails() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
-      var emails = [];
-      for (var i = 0; i < checkboxes.length; i++) {
-        emails.push(checkboxes[i].value);
-      }
-      return emails;
-    }
-
-    async function deleteSelectedRecipients() {
-      var selected = getSelectedEmails();
-      if (selected.length === 0) {
-        alert('Please select at least one recipient to delete.');
+      if (data.length === 0) {
+        container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
+        var countEl = document.getElementById('selectedCount');
+        if (countEl) countEl.textContent = '0 selected';
         return;
       }
       
-      if (!confirm('Delete ' + selected.length + ' selected recipient(s)? This cannot be undone.')) return;
+      var html = '';
+      html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
+      html += '<div style="overflow-x:auto;">';
+      html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
+      html += '<thead>';
+      html += '<tr style="background:#f8f9fa;">';
+      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
+      html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
+      html += '</th>';
+      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
+      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
+      html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
+      html += '</tr>';
+      html += '</thead>';
+      html += '<tbody>';
       
-      var deleteBtn = document.getElementById('deleteSelectedBtn');
-      deleteBtn.disabled = true;
-      deleteBtn.textContent = 'Deleting...';
-      
-      try {
-        var deleted = 0;
-        var failed = 0;
-        var errorMessages = [];
+      for (var i = 0; i < data.length; i++) {
+        var row = data[i];
+        var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
+        var statusColor = row.sent_at ? '#28a745' : '#ff9800';
         
-        for (var i = 0; i < selected.length; i++) {
-          var email = selected[i];
-          try {
-            var response = await fetch('/api/recipients/' + encodeURIComponent(email), { method: 'DELETE' });
-            var data = await response.json();
-            if (response.ok) { deleted++; } 
-            else { 
-              failed++; 
-              errorMessages.push(email + ': ' + (data.error || 'Unknown error'));
-            }
-          } catch (error) {
-            failed++;
-            errorMessages.push(email + ': ' + error.message);
+        html += '<tr style="border-bottom:1px solid #eee;">';
+        html += '<td style="padding:10px;">';
+        html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
+        html += '</td>';
+        html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
+        html += '<td style="padding:10px;">' + row.name + '</td>';
+        html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
+        html += '</tr>';
+      }
+      
+      html += '</tbody>';
+      html += '</table>';
+      html += '</div>';
+      
+      container.innerHTML = html;
+      updateSelectedCount();
+      
+    } catch (error) {
+      container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
+    }
+  }
+
+  function downloadSampleCSV() {
+    var content = 'email,name\\nalice@example.com,Alice\\nbob@example.com,Bob\\ncharlie@example.com,Charlie';
+    var blob = new Blob([content], { type: 'text/csv' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'sample_recipients.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function sendEmails() {
+    var sendBtn = document.getElementById('sendBtn');
+    var statusEl = document.getElementById('sendStatus');
+    var progressEl = document.getElementById('sendProgress');
+    var subject = document.getElementById('emailSubject').value;
+    var template = document.getElementById('emailTemplate').value;
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending...';
+    statusEl.textContent = '';
+    statusEl.style.color = '#007bff';
+    progressEl.innerHTML = '';
+    try {
+      var response = await fetch('/api/send-emails', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: subject, template: template })
+      });
+      var data = await response.json();
+      if (response.ok) {
+        statusEl.textContent = '✅ ' + data.message;
+        statusEl.style.color = '#28a745';
+        if (data.results) {
+          var html = '<div style="margin-top:10px;background:#f8f9fa;padding:10px;border-radius:5px;max-height:200px;overflow-y:auto;">';
+          html += '<table style="width:100%;font-size:13px;">';
+          html += '<tr><th>Email</th><th>Status</th></tr>';
+          for (var i = 0; i < data.results.length; i++) {
+            var result = data.results[i];
+            var color = result.status === 'sent' ? '#28a745' : '#dc3545';
+            html += '<tr><td>' + result.email + '</td><td style="color:' + color + ';font-weight:bold;">' + result.status + '</td></tr>';
           }
-        }
-        
-        if (failed > 0) {
-          alert('⚠️ Deleted ' + deleted + ' recipient(s). ' + failed + ' failed.\n\nErrors:\n' + errorMessages.join('\n'));
-        } else {
-          alert('✅ Deleted ' + deleted + ' recipient(s) successfully.');
+          html += '</table></div>';
+          progressEl.innerHTML = html;
         }
         loadRecipients();
-        
-      } catch (error) {
-        alert('❌ Error: ' + error.message);
-      } finally {
-        deleteBtn.disabled = false;
-        deleteBtn.textContent = '🗑️ Delete Selected';
+        setTimeout(function() { window.location.reload(); }, 3000);
+      } else {
+        statusEl.textContent = '❌ ' + data.error;
+        statusEl.style.color = '#dc3545';
       }
+    } catch (error) {
+      statusEl.textContent = '❌ Error: ' + error.message;
+      statusEl.style.color = '#dc3545';
+    } finally {
+      sendBtn.disabled = false;
+      sendBtn.textContent = 'Send Emails';
     }
+  }
 
-    document.addEventListener('DOMContentLoaded', function() {
+  async function deleteAllRecipients() {
+    if (!confirm('Delete ALL recipients? This cannot be undone.')) return;
+    try {
+      var response = await fetch('/api/recipients/all', { method: 'DELETE' });
+      var data = await response.json();
+      if (response.ok) { loadRecipients(); }
+      else { alert('Error: ' + data.error); }
+    } catch (error) { alert('Error: ' + error.message); }
+  }
+
+  async function deleteAllSent() {
+    if (!confirm('Delete all recipients that have been sent?')) return;
+    try {
+      var response = await fetch('/api/recipients/sent', { method: 'DELETE' });
+      var data = await response.json();
+      if (response.ok) { loadRecipients(); }
+      else { alert('Error: ' + data.error); }
+    } catch (error) { alert('Error: ' + error.message); }
+  }
+
+  function updateSelectedCount() {
+    var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
+    var count = checkboxes.length;
+    var countEl = document.getElementById('selectedCount');
+    if (countEl) countEl.textContent = count + ' selected';
+    
+    var deleteBtn = document.getElementById('deleteSelectedBtn');
+    if (deleteBtn) {
+      deleteBtn.disabled = count === 0;
+      deleteBtn.style.opacity = count === 0 ? '0.5' : '1';
+    }
+  }
+
+  function toggleAllCheckboxes() {
+    var masterCheckbox = document.getElementById('selectAllCheckbox');
+    var checkboxes = document.querySelectorAll('.recipient-checkbox');
+    for (var i = 0; i < checkboxes.length; i++) {
+      checkboxes[i].checked = masterCheckbox.checked;
+    }
+    updateSelectedCount();
+  }
+
+  function selectAllRecipients() {
+    var checkboxes = document.querySelectorAll('.recipient-checkbox');
+    for (var i = 0; i < checkboxes.length; i++) {
+      checkboxes[i].checked = true;
+    }
+    var masterCheckbox = document.getElementById('selectAllCheckbox');
+    if (masterCheckbox) masterCheckbox.checked = true;
+    updateSelectedCount();
+  }
+
+  function deselectAllRecipients() {
+    var checkboxes = document.querySelectorAll('.recipient-checkbox');
+    for (var i = 0; i < checkboxes.length; i++) {
+      checkboxes[i].checked = false;
+    }
+    var masterCheckbox = document.getElementById('selectAllCheckbox');
+    if (masterCheckbox) masterCheckbox.checked = false;
+    updateSelectedCount();
+  }
+
+  function getSelectedEmails() {
+    var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
+    var emails = [];
+    for (var i = 0; i < checkboxes.length; i++) {
+      emails.push(checkboxes[i].value);
+    }
+    return emails;
+  }
+
+  async function deleteSelectedRecipients() {
+    var selected = getSelectedEmails();
+    if (selected.length === 0) {
+      alert('Please select at least one recipient to delete.');
+      return;
+    }
+    
+    if (!confirm('Delete ' + selected.length + ' selected recipient(s)? This cannot be undone.')) return;
+    
+    var deleteBtn = document.getElementById('deleteSelectedBtn');
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = 'Deleting...';
+    
+    try {
+      var deleted = 0;
+      var failed = 0;
+      var errorMessages = [];
+      
+      for (var i = 0; i < selected.length; i++) {
+        var email = selected[i];
+        try {
+          var response = await fetch('/api/recipients/' + encodeURIComponent(email), { method: 'DELETE' });
+          var data = await response.json();
+          if (response.ok) { deleted++; } 
+          else { 
+            failed++; 
+            errorMessages.push(email + ': ' + (data.error || 'Unknown error'));
+          }
+        } catch (error) {
+          failed++;
+          errorMessages.push(email + ': ' + error.message);
+        }
+      }
+      
+      if (failed > 0) {
+        alert('⚠️ Deleted ' + deleted + ' recipient(s). ' + failed + ' failed.\n\nErrors:\n' + errorMessages.join('\n'));
+      } else {
+        alert('✅ Deleted ' + deleted + ' recipient(s) successfully.');
+      }
       loadRecipients();
-      loadSettings();
-    });
-  </script>
+      
+    } catch (error) {
+      alert('❌ Error: ' + error.message);
+    } finally {
+      deleteBtn.disabled = false;
+      deleteBtn.textContent = '🗑️ Delete Selected';
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    loadRecipients();
+    loadSettings();
+  });
+</script>
 </body>
 </html>
     `;
