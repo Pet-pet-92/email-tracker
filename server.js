@@ -531,40 +531,61 @@ app.post('/api/send-emails', async (req, res) => {
   }
 });
 
-// DELETE recipient
+
+/// DELETE recipient - FIXED
 app.delete('/api/recipients/:email', async (req, res) => {
   const { email } = req.params;
+  console.log(`🗑️ Deleting recipient: ${email}`);
+  
   try {
-    await query(`DELETE FROM recipients WHERE email = $1`, [email]);
-    await query(`DELETE FROM clicks WHERE email = $1`, [email]);
-    res.json({ success: true, message: 'Recipient deleted successfully' });
+    // ✅ STEP 1: Delete clicks first (foreign key constraint)
+    const clicksResult = await query(`DELETE FROM clicks WHERE email = $1`, [email]);
+    console.log(`✅ Deleted ${clicksResult.rowCount} clicks for ${email}`);
+    
+    // ✅ STEP 2: Delete the recipient
+    const recipientResult = await query(`DELETE FROM recipients WHERE email = $1`, [email]);
+    
+    if (recipientResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Recipient not found' });
+    }
+    
+    console.log(`✅ Deleted recipient: ${email}`);
+    res.json({ success: true, message: `Recipient ${email} deleted successfully` });
   } catch (error) {
+    console.error('❌ Error deleting recipient:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// DELETE all recipients
 // DELETE all recipients - FIXED
 app.delete('/api/recipients/all', async (req, res) => {
+  console.log('🗑️ Deleting ALL recipients...');
+  
   try {
-    // ✅ DELETE ALL CLICKS FIRST
-    await query(`DELETE FROM clicks`);
+    // ✅ STEP 1: Delete all clicks first
+    const clicksResult = await query(`DELETE FROM clicks`);
+    console.log(`✅ Deleted ${clicksResult.rowCount} clicks`);
     
-    // ✅ THEN DELETE ALL RECIPIENTS
-    await query(`DELETE FROM recipients`);
+    // ✅ STEP 2: Delete all recipients
+    const recipientsResult = await query(`DELETE FROM recipients`);
+    console.log(`✅ Deleted ${recipientsResult.rowCount} recipients`);
     
-    res.json({ success: true, message: 'All recipients deleted successfully' });
+    res.json({ 
+      success: true, 
+      message: `Deleted ${recipientsResult.rowCount} recipients and ${clicksResult.rowCount} clicks` 
+    });
   } catch (error) {
     console.error('❌ Error deleting all recipients:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// DELETE sent recipients only
 // DELETE sent recipients only - FIXED
 app.delete('/api/recipients/sent', async (req, res) => {
+  console.log('🗑️ Deleting SENT recipients...');
+  
   try {
-    // Get emails of sent recipients
+    // ✅ STEP 1: Get emails of sent recipients
     const sentResult = await query(`SELECT email FROM recipients WHERE sent_at IS NOT NULL`);
     const emails = sentResult.rows.map(r => r.email);
     
@@ -572,13 +593,20 @@ app.delete('/api/recipients/sent', async (req, res) => {
       return res.json({ success: true, message: 'No sent recipients to delete' });
     }
     
-    // ✅ DELETE CLICKS FOR SENT RECIPIENTS FIRST
-    await query(`DELETE FROM clicks WHERE email = ANY($1)`, [emails]);
+    console.log(`📋 Found ${emails.length} sent recipients to delete`);
     
-    // ✅ THEN DELETE THE SENT RECIPIENTS
-    await query(`DELETE FROM recipients WHERE sent_at IS NOT NULL`);
+    // ✅ STEP 2: Delete clicks for sent recipients first
+    const clicksResult = await query(`DELETE FROM clicks WHERE email = ANY($1)`, [emails]);
+    console.log(`✅ Deleted ${clicksResult.rowCount} clicks for sent recipients`);
     
-    res.json({ success: true, message: 'Sent recipients deleted successfully' });
+    // ✅ STEP 3: Delete the sent recipients
+    const recipientsResult = await query(`DELETE FROM recipients WHERE sent_at IS NOT NULL`);
+    console.log(`✅ Deleted ${recipientsResult.rowCount} sent recipients`);
+    
+    res.json({ 
+      success: true, 
+      message: `Deleted ${recipientsResult.rowCount} sent recipients and ${clicksResult.rowCount} clicks` 
+    });
   } catch (error) {
     console.error('❌ Error deleting sent recipients:', error);
     res.status(500).json({ error: error.message });
@@ -836,14 +864,34 @@ app.get('/dashboard', async (req, res) => {
         </div>
       </div>
       <div class="card">
-        <h3>Current Recipients</h3>
-        <div id="recipientList"><p>Loading...</p></div>
-        <div style="display:flex;gap:10px;margin-top:15px;flex-wrap:wrap;">
-          <button onclick="deleteAllRecipients()" style="padding:8px 20px;background:#dc3545;color:white;border:none;border-radius:5px;cursor:pointer;">Delete All</button>
-          <button onclick="deleteAllSent()" style="padding:8px 20px;background:#ff9800;color:white;border:none;border-radius:5px;cursor:pointer;">Delete Sent</button>
-        </div>
-      </div>
+  <h3>Current Recipients</h3>
+  
+  <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:8px;">
+    <button onclick="selectAllRecipients()" style="padding:6px 15px;background:#6c757d;color:white;border:none;border-radius:4px;cursor:pointer;">Select All</button>
+    <button onclick="deselectAllRecipients()" style="padding:6px 15px;background:#6c757d;color:white;border:none;border-radius:4px;cursor:pointer;">Deselect All</button>
+    <span style="color:#666;font-size:14px;" id="selectedCount">0 selected</span>
+  </div>
+  
+  <!-- Action Buttons -->
+  <div style="display:flex;gap:10px;margin-bottom:15px;flex-wrap:wrap;">
+    <button onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" style="padding:10px 25px;background:#dc3545;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;">
+      🗑️ Delete Selected
+    </button>
+    <button onclick="deleteAllRecipients()" style="padding:10px 25px;background:#dc3545;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;opacity:0.7;">
+      ⚠️ Delete All
+    </button>
+    <button onclick="deleteAllSent()" style="padding:10px 25px;background:#ff9800;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;">
+      📤 Delete Sent
+    </button>
+  </div>
+  
+  <!-- Recipient List -->
+  <div id="recipientList">
+    <p>Loading...</p>
+  </div>
+</div>
     </div>
+    
     <div id="settings-tab" class="tab-content">
       <div class="card">
         <h3>SMTP Settings</h3>
@@ -957,30 +1005,61 @@ app.get('/dashboard', async (req, res) => {
       } catch (error) { statusEl.textContent = 'Error: ' + error.message; statusEl.className = 'import-status error'; }
     }
 
+    // ✅ FIXED loadRecipients() - No backslashes!
     async function loadRecipients() {
       const container = document.getElementById('recipientList');
       try {
         const response = await fetch('/api/recipients');
         const data = await response.json();
-        if (data.length === 0) { container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>'; return; }
-        let html = '<div class="recipient-count">Total: ' + data.length + ' recipients</div><table><tr><th>Email</th><th>Name</th><th>Sent At</th><th>Action</th></tr>';
-        data.forEach(row => {
-          const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Not sent';
-          html += '<tr><td>' + row.email + '</td><td>' + row.name + '</td><td>' + sentAt + '</td><td><button class="delete-btn" onclick="deleteRecipient(\\'' + row.email + '\\')">Delete</button></td></tr>';
-        });
+        
+        if (data.length === 0) {
+          container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
+          const countEl = document.getElementById('selectedCount');
+          if (countEl) countEl.textContent = '0 selected';
+          return;
+        }
+        
+        let html = '';
+        html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
+        html += '<div style="overflow-x:auto;">';
+        html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
+        html += '<thead>';
+        html += '<tr style="background:#f8f9fa;">';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
+        html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
+        html += '</th>';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
+        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
+        html += '</tr>';
+        html += '</thead>';
+        html += '<tbody>';
+        
+        for (var i = 0; i < data.length; i++) {
+          var row = data[i];
+          var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
+          var statusColor = row.sent_at ? '#28a745' : '#ff9800';
+          
+          html += '<tr style="border-bottom:1px solid #eee;">';
+          html += '<td style="padding:10px;">';
+          html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
+          html += '</td>';
+          html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
+          html += '<td style="padding:10px;">' + row.name + '</td>';
+          html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
+          html += '</tr>';
+        }
+        
+        html += '</tbody>';
         html += '</table>';
+        html += '</div>';
+        
         container.innerHTML = html;
-      } catch (error) { container.innerHTML = '<p style="color:red;">Error loading recipients</p>'; }
-    }
-
-    async function deleteRecipient(email) {
-      if (!confirm('Delete ' + email + '?')) return;
-      try {
-        const response = await fetch('/api/recipients/' + encodeURIComponent(email), { method: 'DELETE' });
-        const data = await response.json();
-        if (response.ok) { loadRecipients(); window.location.reload(); }
-        else { alert('Error: ' + data.error); }
-      } catch (error) { alert('Error: ' + error.message); }
+        updateSelectedCount();
+        
+      } catch (error) {
+        container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
+      }
     }
 
     function downloadSampleCSV() {
@@ -1040,7 +1119,7 @@ app.get('/dashboard', async (req, res) => {
       try {
         const response = await fetch('/api/recipients/all', { method: 'DELETE' });
         const data = await response.json();
-        if (response.ok) { loadRecipients(); window.location.reload(); }
+        if (response.ok) { loadRecipients(); }
         else { alert('Error: ' + data.error); }
       } catch (error) { alert('Error: ' + error.message); }
     }
@@ -1050,9 +1129,116 @@ app.get('/dashboard', async (req, res) => {
       try {
         const response = await fetch('/api/recipients/sent', { method: 'DELETE' });
         const data = await response.json();
-        if (response.ok) { loadRecipients(); window.location.reload(); }
+        if (response.ok) { loadRecipients(); }
         else { alert('Error: ' + data.error); }
       } catch (error) { alert('Error: ' + error.message); }
+    }
+
+    // ============================================
+    // SELECTION FUNCTIONS
+    // ============================================
+
+    function updateSelectedCount() {
+      const checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
+      const count = checkboxes.length;
+      const countEl = document.getElementById('selectedCount');
+      if (countEl) countEl.textContent = count + ' selected';
+      
+      const deleteBtn = document.getElementById('deleteSelectedBtn');
+      if (deleteBtn) {
+        deleteBtn.disabled = count === 0;
+        deleteBtn.style.opacity = count === 0 ? '0.5' : '1';
+      }
+    }
+
+    function toggleAllCheckboxes() {
+      const masterCheckbox = document.getElementById('selectAllCheckbox');
+      const checkboxes = document.querySelectorAll('.recipient-checkbox');
+      checkboxes.forEach(function(cb) {
+        cb.checked = masterCheckbox.checked;
+      });
+      updateSelectedCount();
+    }
+
+    function selectAllRecipients() {
+      const checkboxes = document.querySelectorAll('.recipient-checkbox');
+      checkboxes.forEach(function(cb) {
+        cb.checked = true;
+      });
+      const masterCheckbox = document.getElementById('selectAllCheckbox');
+      if (masterCheckbox) masterCheckbox.checked = true;
+      updateSelectedCount();
+    }
+
+    function deselectAllRecipients() {
+      const checkboxes = document.querySelectorAll('.recipient-checkbox');
+      checkboxes.forEach(function(cb) {
+        cb.checked = false;
+      });
+      const masterCheckbox = document.getElementById('selectAllCheckbox');
+      if (masterCheckbox) masterCheckbox.checked = false;
+      updateSelectedCount();
+    }
+
+    function getSelectedEmails() {
+      const checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
+      const emails = [];
+      checkboxes.forEach(function(cb) {
+        emails.push(cb.value);
+      });
+      return emails;
+    }
+
+    async function deleteSelectedRecipients() {
+      const selected = getSelectedEmails();
+      if (selected.length === 0) {
+        alert('Please select at least one recipient to delete.');
+        return;
+      }
+      
+      if (!confirm('Delete ' + selected.length + ' selected recipient(s)? This cannot be undone.')) return;
+      
+      var deleteBtn = document.getElementById('deleteSelectedBtn');
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = 'Deleting...';
+      
+      try {
+        var deleted = 0;
+        var failed = 0;
+        var errorMessages = [];
+        
+        for (var i = 0; i < selected.length; i++) {
+          var email = selected[i];
+          try {
+            var response = await fetch('/api/recipients/' + encodeURIComponent(email), {
+              method: 'DELETE'
+            });
+            var data = await response.json();
+            if (response.ok) {
+              deleted++;
+            } else {
+              failed++;
+              errorMessages.push(email + ': ' + (data.error || 'Unknown error'));
+            }
+          } catch (error) {
+            failed++;
+            errorMessages.push(email + ': ' + error.message);
+          }
+        }
+        
+        if (failed > 0) {
+          alert('⚠️ Deleted ' + deleted + ' recipient(s). ' + failed + ' failed.\n\nErrors:\n' + errorMessages.join('\n'));
+        } else {
+          alert('✅ Deleted ' + deleted + ' recipient(s) successfully.');
+        }
+        loadRecipients();
+        
+      } catch (error) {
+        alert('❌ Error: ' + error.message);
+      } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = '🗑️ Delete Selected';
+      }
     }
 
     document.addEventListener('DOMContentLoaded', function() {
@@ -1146,4 +1332,4 @@ if (process.env.NODE_ENV !== 'production') {
 // ============================================
 // EXPORT FOR VERCEL
 // ============================================
-module.exports = app;  // ← This is what Vercel needs
+module.exports = app;
