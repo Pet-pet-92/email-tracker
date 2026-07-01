@@ -545,7 +545,7 @@ app.get('/results', async (req, res) => {
 });
 
 // ============================================
-// DASHBOARD (with working tabs)
+// DASHBOARD
 // ============================================
 app.get('/dashboard', async (req, res) => {
   const statusFilter = req.query.status || 'all';
@@ -655,8 +655,6 @@ app.get('/dashboard', async (req, res) => {
     th { background: #f8f9fa; font-weight: 600; }
     .status-clicked { color: #28a745; font-weight: bold; }
     .status-not-clicked { color: #dc3545; font-weight: bold; }
-    .delete-btn { background: #dc3545; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-    .delete-btn:hover { background: #c82333; }
     .no-results { text-align: center; padding: 40px; color: #999; }
     .recipient-count { color: #666; font-size: 14px; margin-top: 10px; }
     .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -816,8 +814,12 @@ app.get('/dashboard', async (req, res) => {
           buttons[i].classList.add('active');
         }
       }
-      if (tabId === 'manage-tab') { loadRecipients(); }
-      if (tabId === 'settings-tab') { loadSettings(); }
+      if (tabId === 'manage-tab') {
+        loadRecipients();
+      }
+      if (tabId === 'settings-tab') {
+        loadSettings();
+      }
     }
 
     async function loadSettings() {
@@ -847,11 +849,23 @@ app.get('/dashboard', async (req, res) => {
         sender_password: document.getElementById('senderPassword').value
       };
       try {
-        var response = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+        var response = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings)
+        });
         var data = await response.json();
-        if (response.ok) { messageEl.textContent = '✅ ' + data.message; messageEl.style.color = '#28a745'; }
-        else { messageEl.textContent = '❌ ' + data.error; messageEl.style.color = '#dc3545'; }
-      } catch (error) { messageEl.textContent = '❌ Error: ' + error.message; messageEl.style.color = '#dc3545'; }
+        if (response.ok) {
+          messageEl.textContent = '✅ ' + data.message;
+          messageEl.style.color = '#28a745';
+        } else {
+          messageEl.textContent = '❌ ' + data.error;
+          messageEl.style.color = '#dc3545';
+        }
+      } catch (error) {
+        messageEl.textContent = '❌ Error: ' + error.message;
+        messageEl.style.color = '#dc3545';
+      }
     }
 
     async function testSettings() {
@@ -866,11 +880,23 @@ app.get('/dashboard', async (req, res) => {
         sender_password: document.getElementById('senderPassword').value
       };
       try {
-        var response = await fetch('/api/settings/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+        var response = await fetch('/api/settings/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings)
+        });
         var data = await response.json();
-        if (response.ok) { messageEl.textContent = '✅ ' + data.message; messageEl.style.color = '#28a745'; }
-        else { messageEl.textContent = '❌ ' + data.error; messageEl.style.color = '#dc3545'; }
-      } catch (error) { messageEl.textContent = '❌ Error: ' + error.message; messageEl.style.color = '#dc3545'; }
+        if (response.ok) {
+          messageEl.textContent = '✅ ' + data.message;
+          messageEl.style.color = '#28a745';
+        } else {
+          messageEl.textContent = '❌ ' + data.error;
+          messageEl.style.color = '#dc3545';
+        }
+      } catch (error) {
+        messageEl.textContent = '❌ Error: ' + error.message;
+        messageEl.style.color = '#dc3545';
+      }
     }
 
     async function addRecipient(event) {
@@ -879,26 +905,58 @@ app.get('/dashboard', async (req, res) => {
       var name = document.getElementById('nameInput').value;
       var messageEl = document.getElementById('addMessage');
       try {
-        var response = await fetch('/api/recipients', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: email, name: name }) });
+        var response = await fetch('/api/recipients', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email, name: name })
+        });
         var data = await response.json();
-        if (response.ok) { messageEl.textContent = data.message; messageEl.className = 'message success'; document.getElementById('emailInput').value = ''; document.getElementById('nameInput').value = ''; loadRecipients(); }
-        else { messageEl.textContent = data.error; messageEl.className = 'message error'; }
-      } catch (error) { messageEl.textContent = 'Error: ' + error.message; messageEl.className = 'message error'; }
+        if (response.ok) {
+          messageEl.textContent = data.message;
+          messageEl.className = 'message success';
+          document.getElementById('emailInput').value = '';
+          document.getElementById('nameInput').value = '';
+          loadRecipients();
+        } else {
+          messageEl.textContent = data.error;
+          messageEl.className = 'message error';
+        }
+      } catch (error) {
+        messageEl.textContent = 'Error: ' + error.message;
+        messageEl.className = 'message error';
+      }
     }
 
     async function importCSV(event) {
       event.preventDefault();
       var fileInput = document.getElementById('csvFile');
       var statusEl = document.getElementById('importStatus');
-      if (!fileInput.files.length) { statusEl.textContent = 'Please select a file'; statusEl.className = 'import-status error'; return; }
+      if (!fileInput.files.length) {
+        statusEl.textContent = 'Please select a file';
+        statusEl.className = 'import-status error';
+        return;
+      }
       var formData = new FormData();
       formData.append('csvFile', fileInput.files[0]);
       try {
-        var response = await fetch('/api/recipients/import', { method: 'POST', body: formData });
+        var response = await fetch('/api/recipients/import', {
+          method: 'POST',
+          body: formData
+        });
         var data = await response.json();
-        if (response.ok) { statusEl.textContent = data.message; statusEl.className = 'import-status success'; fileInput.value = ''; loadRecipients(); }
-        else { statusEl.textContent = data.error; statusEl.className = 'import-status error'; }
-      } catch (error) { statusEl.textContent = 'Error: ' + error.message; statusEl.className = 'import-status error'; }
+        if (response.ok) {
+          statusEl.textContent = data.message;
+          statusEl.className = 'import-status success';
+          fileInput.value = '';
+          loadRecipients();
+        } else {
+          statusEl.textContent = data.error;
+          statusEl.className = 'import-status error';
+        }
+      } catch (error) {
+        statusEl.textContent = 'Error: ' + error.message;
+        statusEl.className = 'import-status error';
+      }
     }
 
     async function loadRecipients() {
@@ -929,7 +987,7 @@ app.get('/dashboard', async (req, res) => {
         html += '<tbody>';
         for (var i = 0; i < data.length; i++) {
           var row = data[i];
-          var status = row.sent_at ? '✅ Sent' : '⏳ Pending';
+          var status = row.sent_at ? 'Sent' : 'Pending';
           var statusColor = row.sent_at ? '#28a745' : '#ff9800';
           html += '<tr style="border-bottom:1px solid #eee;">';
           html += '<td style="padding:10px;">';
@@ -973,7 +1031,11 @@ app.get('/dashboard', async (req, res) => {
       statusEl.style.color = '#007bff';
       progressEl.innerHTML = '';
       try {
-        var response = await fetch('/api/send-emails', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subject: subject, template: template }) });
+        var response = await fetch('/api/send-emails', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject: subject, template: template })
+        });
         var data = await response.json();
         if (response.ok) {
           statusEl.textContent = '✅ ' + data.message;
@@ -1190,7 +1252,7 @@ app.get('/clicked-link-page', (req, res) => {
 });
 
 // ============================================
-// START THE SERVER (For Local Development)
+// START THE SERVER
 // ============================================
 const PORT = process.env.PORT || 3000;
 
