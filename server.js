@@ -5,32 +5,29 @@ const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const multer = require('multer');
 const Papa = require('papaparse');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
+
 const app = express();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-change-this-in-production';
+
 // Serverless-optimized connection pool config
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { 
-    rejectUnauthorized: false 
-  },
+  ssl: { rejectUnauthorized: false },
   max: 1, 
-  idleTimeoutMillis: 10000, // Automatically close idle connections after 10s
-  connectionTimeoutMillis: 5000, // Fail fast (5s) instead of hanging for 5 mins
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 5000,
 });
-
-/* pool.connect((err) => {
-  if (err) {
-    console.error('Error connecting to PostgreSQL:', err.stack);
-  } else {
-    console.log('Connected to PostgreSQL!');
-  }
-});  */
 
 async function query(text, params) {
   const res = await pool.query(text, params);
@@ -45,12 +42,34 @@ function escapeHTML(str) {
   );
 }
 
-function generateLinks(recipients) {
+// AUTHENTICATION MIDDLEWARE: Verifies who is making the request
+function authenticateToken(req, res, next) {
+  const token = req.cookies.token;
+  
+  if (!token) {
+    if (req.path === '/dashboard') {
+      return res.redirect('/login');
+    }
+    return res.status(401).json({ error: 'Access denied. Please log in.' });
+  }
+
+  try {
+    const verified = jwt.verify(token, JWT_SECRET);
+    req.user = verified; 
+    next();
+  } catch (error) {
+    res.clearCookie('token');
+    if (req.path === '/dashboard') return res.redirect('/login');
+    return res.status(403).json({ error: 'Invalid or expired session token.' });
+  }
+}
+
+function generateLinks(recipients, baseUrl) {
   const results = [];
   recipients.forEach(person => {
     const uniqueId = crypto.randomBytes(16).toString('hex');
-    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-    const link = baseUrl + '/click/' + uniqueId;
+    const base = baseUrl || 'http://localhost:3000';
+    const link = base + '/click/' + uniqueId;
     
     let name = person.name;
     if (!name) {
@@ -70,8 +89,8 @@ function generateLinks(recipients) {
 }
 
 // Sequential, rate-limited email distribution function to prevent SMTP blocking
-async function sendEmails(recipients, customSubject, customTemplate) {
-  const settingsResult = await query('SELECT * FROM settings ORDER BY id DESC LIMIT 1');
+async function sendEmails(recipients, customSubject, customTemplate, userId) {
+  const settingsResult = await query('SELECT * FROM settings WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [userId]);
   const settings = settingsResult.rows[0];
   
   if (!settings || !settings.sender_email || !settings.sender_password) {
@@ -98,7 +117,7 @@ async function sendEmails(recipients, customSubject, customTemplate) {
   `;
 
   for (const person of recipients) {
-    const existingResult = await query('SELECT id, link, name FROM recipients WHERE email = $1', [person.email]);
+    const existingResult = await query('SELECT id, link, name FROM recipients WHERE email = $1 AND user_id = $2', [person.email, userId]);
     const existingRecipient = existingResult.rows[0];
     
     if (!existingRecipient) {
@@ -117,11 +136,10 @@ async function sendEmails(recipients, customSubject, customTemplate) {
 
     try {
       await transporter.sendMail(mailOptions);
-      await query('UPDATE recipients SET sent_at = NOW() WHERE email = $1', [person.email]);
+      await query('UPDATE recipients SET sent_at = NOW() WHERE email = $1 AND user_id = $2', [person.email, userId]);
       sentEmails.push({ email: person.email, status: 'sent' });
       console.log('Email sent to', person.email);
       
-      // 200ms cooldown delay to pace SMTP connections safely on serverless runs
       await new Promise(resolve => setTimeout(resolve, 200));
     } catch (error) {
       console.error('Failed to send to', person.email, error.message);
@@ -133,33 +151,146 @@ async function sendEmails(recipients, customSubject, customTemplate) {
 }
 
 // ============================================
-// ROUTES
+// AUTH VIEWS & API ENDPOINTS
 // ============================================
 
 app.get('/', (req, res) => {
   res.redirect('/dashboard');
 });
 
+app.get('/login', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Login - Email Tracker</title>
+      <style>
+        body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f5f5f5; margin: 0; }
+        .auth-card { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        h2 { margin-top: 0; color: #333; text-align: center; }
+        input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; transition: background 0.2s; }
+        button:hover { background: #0056b3; }
+        .toggle-link { text-align: center; margin-top: 20px; font-size: 14px; color: #666; }
+        .toggle-link a { color: #007bff; text-decoration: none; font-weight: bold; }
+      </style>
+    </head>
+    <body>
+      <div class="auth-card">
+        <h2>Login to Campaign</h2>
+        <form action="/api/auth/login" method="POST">
+          <input type="email" name="email" placeholder="Email Address" required>
+          <input type="password" name="password" placeholder="Password" required>
+          <button type="submit">Sign In</button>
+        </form>
+        <div class="toggle-link">Don't have an account? <a href="/register">Register here</a></div>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.get('/register', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Register - Email Tracker</title>
+      <style>
+        body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f5f5f5; margin: 0; }
+        .auth-card { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        h2 { margin-top: 0; color: #333; text-align: center; }
+        input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; font-size: 14px; }
+        button { width: 100%; padding: 12px; background: #28a745; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 16px; transition: background 0.2s; }
+        button:hover { background: #218838; }
+        .toggle-link { text-align: center; margin-top: 20px; font-size: 14px; color: #666; }
+        .toggle-link a { color: #007bff; text-decoration: none; font-weight: bold; }
+      </style>
+    </head>
+    <body>
+      <div class="auth-card">
+        <h2>Create Account</h2>
+        <form action="/api/auth/register" method="POST">
+          <input type="text" name="username" placeholder="Username" required>
+          <input type="email" name="email" placeholder="Email Address" required>
+          <input type="password" name="password" placeholder="Password" required>
+          <button type="submit">Sign Up</button>
+        </form>
+        <div class="toggle-link">Already have an account? <a href="/login">Login here</a></div>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  const { username, email, password } = req.body;
+  try {
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    const result = await query(
+      'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id',
+      [username, email, passwordHash]
+    );
+
+    await query(
+      'INSERT INTO settings (user_id, smtp_host, smtp_port, smtp_secure, sender_email, sender_password) VALUES ($1, $2, $3, $4, $5, $6)',
+      [result.rows[0].id, 'smtp.gmail.com', 587, 0, 'placeholder@gmail.com', 'password']
+    );
+
+    res.send('<body style="font-family:Arial;text-align:center;padding:50px;"><h3>Registration successful! <a href="/login">Click here to login</a></h3></body>');
+  } catch (error) {
+    res.status(400).send('Registration failed: ' + error.message);
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  try {
+    const result = await query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
+
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(400).send('<body style="font-family:Arial;text-align:center;padding:50px;"><h3>Invalid credentials. <a href="/login">Try again</a></h3></body>');
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
+    
+    res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'strict' });
+    res.redirect('/dashboard');
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/api/auth/logout', (req, res) => {
+  res.clearCookie('token');
+  res.redirect('/login');
+});
+
+// ============================================
+// CORE ISOLATED API ENDPOINTS
+// ============================================
+
 app.get('/click/:id', async (req, res) => {
   const id = req.params.id;
-  console.log('Looking for ID:', id);
   const userAgent = req.headers['user-agent'] || 'Unknown';
   const ip = req.ip || req.connection.remoteAddress || 'Unknown';
 
   try {
-    const result = await query('SELECT email, name FROM recipients WHERE id = $1', [id]);
+    const result = await query('SELECT email, name, user_id FROM recipients WHERE id = $1', [id]);
     const row = result.rows[0];
 
     if (!row) {
-      return res.status(404).send('Invalid or expired link');
+      return res.status(404).send('Invalid tracking node execution asset.');
     }
 
     await query(
-      'INSERT INTO clicks (recipient_id, email, timestamp, user_agent, ip) VALUES ($1, $2, NOW(), $3, $4)',
-      [id, row.email, userAgent, ip]
+      'INSERT INTO clicks (recipient_id, user_id, email, timestamp, user_agent, ip) VALUES ($1, $2, $3, NOW(), $4, $5)',
+      [id, row.user_id, row.email, userAgent, ip]
     );
 
-    console.log('CLICK:', row.email);
     res.redirect('/clicked-link-page?email=' + encodeURIComponent(row.email) + '&name=' + encodeURIComponent(row.name));
   } catch (error) {
     console.error('Error in tracking:', error);
@@ -167,26 +298,23 @@ app.get('/click/:id', async (req, res) => {
   }
 });
 
-app.get('/api/recipients', async (req, res) => {
+app.get('/api/recipients', authenticateToken, async (req, res) => {
   try {
-    const result = await query('SELECT email, name, sent_at FROM recipients ORDER BY sent_at DESC');
+    const result = await query('SELECT email, name, sent_at FROM recipients WHERE user_id = $1 ORDER BY sent_at DESC', [req.user.id]);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/recipients', async (req, res) => {
+app.post('/api/recipients', authenticateToken, async (req, res) => {
   const { email, name } = req.body;
-  
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required' });
-  }
+  if (!email) return res.status(400).json({ error: 'Email is required' });
   
   try {
-    const existing = await query('SELECT * FROM recipients WHERE email = $1', [email]);
+    const existing = await query('SELECT * FROM recipients WHERE email = $1 AND user_id = $2', [email, req.user.id]);
     if (existing.rows.length > 0) {
-      return res.status(400).json({ error: 'Email already exists' });
+      return res.status(400).json({ error: 'Email already exists in your account records.' });
     }
     
     const uniqueId = crypto.randomBytes(16).toString('hex');
@@ -195,19 +323,14 @@ app.post('/api/recipients', async (req, res) => {
 
     let finalName = name;
     if (!finalName) {
-      finalName = email.split('@')[0];
-      finalName = finalName.replace(/[0-9]/g, '');
-      finalName = finalName.replace(/[._-]/g, ' ');
-      finalName = finalName.trim();
-      finalName = finalName.split(' ').map(word => 
-        word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-      ).join(' ');
+      finalName = email.split('@')[0].replace(/[0-9]/g, '').replace(/[._-]/g, ' ').trim();
+      finalName = finalName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
       if (!finalName) finalName = 'N/A';
     }
     
     await query(
-      'INSERT INTO recipients (id, email, name, link, sent_at) VALUES ($1, $2, $3, $4, NULL)',
-      [uniqueId, email, finalName, link]
+      'INSERT INTO recipients (id, user_id, email, name, link, sent_at) VALUES ($1, $2, $3, $4, $5, NULL)',
+      [uniqueId, req.user.id, email, finalName, link]
     );
     
     res.json({ success: true, message: 'Recipient added successfully!', email: email, name: finalName });
@@ -216,274 +339,160 @@ app.post('/api/recipients', async (req, res) => {
   }
 });
 
-app.post('/api/recipients/import', upload.single('csvFile'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
+app.post('/api/recipients/import', authenticateToken, upload.single('csvFile'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   
   try {
     const csvString = req.file.buffer.toString('utf8');
-    const result = Papa.parse(csvString, {
-      header: true,
-      skipEmptyLines: true,
-      trimHeaders: true,
-      delimiter: ','
-    });
+    const result = Papa.parse(csvString, { header: true, skipEmptyLines: true, trimHeaders: true });
     
     const results = [];
     result.data.forEach((row) => {
       const emailKey = Object.keys(row).find(key => key.toLowerCase().trim() === 'email');
-      const nameKey = Object.keys(row).find(key => key.toLowerCase().trim() === 'name' || key.toLowerCase().trim() === 'firstname');
-      
-      if (emailKey) {
-        const email = row[emailKey];
-        const name = nameKey ? row[nameKey] : '';
-        if (email && email.trim()) {
-          results.push({ email: email.trim(), name: name.trim() });
-        }
+      const nameKey = Object.keys(row).find(key => key.toLowerCase().trim() === 'name');
+      if (emailKey && row[emailKey]) {
+        results.push({ email: row[emailKey].trim(), name: nameKey ? row[nameKey].trim() : '' });
       }
     });
     
-    if (results.length === 0) {
-      return res.status(400).json({ error: 'No valid emails found in CSV.' });
-    }
+    if (results.length === 0) return res.status(400).json({ error: 'No valid emails found.' });
     
     let saved = 0;
-    let errors = 0;
-    
-    for (const person of results) {
-      try {
-        const uniqueId = crypto.randomBytes(16).toString('hex');
-        const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-        const link = baseUrl + '/click/' + uniqueId;
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
 
-        let name = person.name;
-        if (!name) {
-          name = person.email.split('@')[0];
-          name = name.replace(/[0-9]/g, '');
-          name = name.replace(/[._-]/g, ' ');
-          name = name.trim();
-          name = name.split(' ').map(word => 
-            word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-          ).join(' ');
-          if (!name) name = 'N/A';
-        }
-        
-        await query(
-          'INSERT INTO recipients (id, email, name, link, sent_at) VALUES ($1, $2, $3, $4, NULL) ON CONFLICT (email) DO NOTHING',
-          [uniqueId, person.email, name, link]
-        );
-        saved++;
-      } catch (error) {
-        errors++;
-      }
+    for (const person of results) {
+      const uniqueId = crypto.randomBytes(16).toString('hex');
+      const link = baseUrl + '/click/' + uniqueId;
+      let name = person.name || person.email.split('@')[0].replace(/[._-]/g, ' ');
+
+      await query(
+        'INSERT INTO recipients (id, user_id, email, name, link, sent_at) VALUES ($1, $2, $3, $4, $5, NULL) ON CONFLICT (email, user_id) DO NOTHING',
+        [uniqueId, req.user.id, person.email, name, link]
+      );
+      saved++;
     }
-    
-    res.json({ 
-      success: true, 
-      message: 'Imported ' + saved + ' recipients, ' + errors + ' skipped'
-    });
-    
+    res.json({ success: true, message: `Imported ${saved} records successfully.` });
   } catch (error) {
-    res.status(500).json({ error: 'Error processing CSV: ' + error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/settings', async (req, res) => {
+app.get('/api/settings', authenticateToken, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM settings ORDER BY id DESC LIMIT 1');
+    const result = await query('SELECT * FROM settings WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [req.user.id]);
     res.json(result.rows[0] || {});
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/settings', async (req, res) => {
+app.post('/api/settings', authenticateToken, async (req, res) => {
   const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
-  
-  if (!smtp_host || !smtp_port || !sender_email || !sender_password) {
-    return res.status(400).json({ error: 'All fields are required' });
-  }
-  
   try {
     await query(`
-      UPDATE settings 
-      SET smtp_host = $1, smtp_port = $2, smtp_secure = $3, sender_email = $4, sender_password = $5, updated_at = NOW()
-      WHERE id = (SELECT id FROM settings ORDER BY id DESC LIMIT 1)
-    `, [smtp_host, smtp_port, smtp_secure, sender_email, sender_password]);
-    
+      INSERT INTO settings (user_id, smtp_host, smtp_port, smtp_secure, sender_email, sender_password, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      ON CONFLICT (user_id) DO UPDATE 
+      SET smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLUDED.smtp_port, smtp_secure = EXCLUDED.smtp_secure, 
+          sender_email = EXCLUDED.sender_email, sender_password = EXCLUDED.sender_password, updated_at = NOW()
+    `, [req.user.id, smtp_host, parseInt(smtp_port), parseInt(smtp_secure), sender_email, sender_password]);
     res.json({ success: true, message: 'Settings updated successfully!' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/settings/test', async (req, res) => {
-  const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
-  
-  try {
-    const transporter = nodemailer.createTransport({
-      host: smtp_host,
-      port: parseInt(smtp_port),
-      secure: smtp_secure == 1,
-      auth: {
-        user: sender_email,
-        pass: sender_password
-      }
-    });
-    
-    await transporter.verify();
-    res.json({ success: true, message: 'Connection successful!' });
-  } catch (error) {
-    res.status(400).json({ error: 'Connection failed: ' + error.message });
-  }
-});
-
-app.post('/api/send-emails', async (req, res) => {
+app.post('/api/send-emails', authenticateToken, async (req, res) => {
   const { subject, template } = req.body;
-  
   try {
-    const recipientsResult = await query('SELECT email, name FROM recipients');
-    const recipients = recipientsResult.rows;
+    const recipientsResult = await query('SELECT email, name FROM recipients WHERE user_id = $1', [req.user.id]);
+    if (recipientsResult.rows.length === 0) return res.status(400).json({ error: 'No recipients found.' });
     
-    if (recipients.length === 0) {
-      return res.status(400).json({ error: 'No recipients to send to.' });
-    }
-    
-    const linksResult = await query('SELECT link FROM recipients WHERE link IS NOT NULL LIMIT 1');
-    let hasLinks = linksResult.rows.length > 0;
-    
-    if (!hasLinks) {
-      const trackingData = generateLinks(recipients);
-      for (const person of trackingData) {
-        await query('UPDATE recipients SET link = $1 WHERE email = $2', [person.link, person.email]);
-      }
-    }
-    
-    const settingsResult = await query('SELECT * FROM settings ORDER BY id DESC LIMIT 1');
-    const settings = settingsResult.rows[0];
-    
-    if (!settings || !settings.sender_email || !settings.sender_password) {
-      return res.status(400).json({ error: 'SMTP settings not configured.' });
-    }
-    
-    const results = await sendEmails(recipients, subject, template);
-    
-    const sent = results.filter(r => r.status === 'sent').length;
-    const failed = results.filter(r => r.status === 'failed').length;
-    
-    res.json({
-      success: true,
-      message: 'Emails sent successfully! ' + sent + ' sent, ' + failed + ' failed.',
-      results: results
-    });
+    const results = await sendEmails(recipientsResult.rows, subject, template, req.user.id);
+    res.json({ success: true, message: 'Emails dispatched.', results });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to send emails: ' + error.message });
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ============================================
-// DELETION API ENDPOINTS (CORRECTED & BULK DEPLOYED)
+// DELETION API ENDPOINTS (ISOLATED)
 // ============================================
 
-app.post('/api/recipients/bulk-delete', async (req, res) => {
+app.post('/api/recipients/bulk-delete', authenticateToken, async (req, res) => {
   const { emails } = req.body;
   if (!emails || !Array.isArray(emails) || emails.length === 0) {
-    return res.status(400).json({ error: 'No recipient rows selected.' });
+    return res.status(400).json({ error: 'No data selected.' });
   }
   try {
-    await query('DELETE FROM clicks WHERE email = ANY($1)', [emails]);
-    const deleteResult = await query('DELETE FROM recipients WHERE email = ANY($1)', [emails]);
-    res.json({ success: true, message: `Successfully deleted ${deleteResult.rowCount} recipient(s).` });
+    await query('DELETE FROM clicks WHERE email = ANY($1) AND user_id = $2', [emails, req.user.id]);
+    const result = await query('DELETE FROM recipients WHERE email = ANY($1) AND user_id = $2', [emails, req.user.id]);
+    res.json({ success: true, message: `Successfully deleted ${result.rowCount} recipient(s).` });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/recipients/all', async (req, res) => {
+app.delete('/api/recipients/all', authenticateToken, async (req, res) => {
   try {
-    await query('DELETE FROM clicks');
-    await query('DELETE FROM recipients');
-    res.json({ success: true, message: 'All recipients cleared successfully!' });
+    await query('DELETE FROM clicks WHERE user_id = $1', [req.user.id]);
+    await query('DELETE FROM recipients WHERE user_id = $1', [req.user.id]);
+    res.json({ success: true, message: 'All list entries cleared.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/recipients/sent', async (req, res) => {
+app.delete('/api/recipients/sent', authenticateToken, async (req, res) => {
   try {
-    const sentResult = await query('SELECT email FROM recipients WHERE sent_at IS NOT NULL');
+    const sentResult = await query('SELECT email FROM recipients WHERE sent_at IS NOT NULL AND user_id = $1', [req.user.id]);
     const emails = sentResult.rows.map(r => r.email);
-    if (emails.length === 0) {
-      return res.json({ success: true, message: 'No sent records to clear.' });
-    }
-    await query('DELETE FROM clicks WHERE email = ANY($1)', [emails]);
-    await query('DELETE FROM recipients WHERE sent_at IS NOT NULL');
-    res.json({ success: true, message: 'Sent records wiped successfully!' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+    if (emails.length === 0) return res.json({ success: true, message: 'No records to clear.' });
 
-app.get('/debug/recipients', async (req, res) => {
-  try {
-    const result = await query('SELECT id, email, link FROM recipients');
-    res.json(result.rows);
+    await query('DELETE FROM clicks WHERE email = ANY($1) AND user_id = $2', [emails, req.user.id]);
+    await query('DELETE FROM recipients WHERE sent_at IS NOT NULL AND user_id = $1', [req.user.id]);
+    res.json({ success: true, message: 'Sent metrics wiped.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // ============================================
-// DASHBOARD VIEW LAYER
+// DASHBOARD VIEW LAYER (AUTHENTICATED)
 // ============================================
-app.get('/dashboard', async (req, res) => {
+app.get('/dashboard', authenticateToken, async (req, res) => {
+  const userId = req.user.id;
   const statusFilter = req.query.status || 'all';
   const dateFilter = req.query.date || 'all';
   
   let whereClause = '';
   let dateCondition = '';
   
-  if (statusFilter === 'clicked') {
-    whereClause = 'HAVING COUNT(c.id) > 0';
-  } else if (statusFilter === 'not-clicked') {
-    whereClause = 'HAVING COUNT(c.id) = 0';
-  }
+  if (statusFilter === 'clicked') whereClause = 'HAVING COUNT(c.id) > 0';
+  else if (statusFilter === 'not-clicked') whereClause = 'HAVING COUNT(c.id) = 0';
   
-  if (dateFilter === 'today') {
-    dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE";
-  } else if (dateFilter === 'yesterday') {
-    dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE - INTERVAL '1 day'";
-  } else if (dateFilter === 'week') {
-    dateCondition = "AND DATE(r.sent_at) >= CURRENT_DATE - INTERVAL '7 days'";
-  }
+  if (dateFilter === 'today') dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE";
+  else if (dateFilter === 'yesterday') dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE - INTERVAL '1 day'";
+  else if (dateFilter === 'week') dateCondition = "AND DATE(r.sent_at) >= CURRENT_DATE - INTERVAL '7 days'";
   
   const queryText = `
-    SELECT 
-      r.email,
-      r.name,
-      r.sent_at,
-      COUNT(c.id) as click_count,
-      MAX(c.timestamp) as last_click
+    SELECT r.email, r.name, r.sent_at, COUNT(c.id) as click_count, MAX(c.timestamp) as last_click
     FROM recipients r
     LEFT JOIN clicks c ON r.id = c.recipient_id
-    WHERE 1=1 ${dateCondition}
+    WHERE r.user_id = $1 ${dateCondition}
     GROUP BY r.id, r.email, r.name, r.sent_at
     ${whereClause}
     ORDER BY r.sent_at DESC
   `;
   
   try {
-    const rowsResult = await query(queryText);
+    const rowsResult = await query(queryText, [userId]);
     const rows = rowsResult.rows;
     
     const totalSent = rows.length;
     let totalClicked = 0;
     let totalNotClicked = 0;
-    for (let i = 0; i < rows.length; i++) {
-      if (parseInt(rows[i].click_count) > 0) totalClicked++;
-      else totalNotClicked++;
-    }
+    rows.forEach(r => { if (parseInt(r.click_count) > 0) totalClicked++; else totalNotClicked++; });
     
     const statusOptions = `
       <option value="all" ${statusFilter === 'all' ? 'selected' : ''}>All</option>
@@ -498,110 +507,67 @@ app.get('/dashboard', async (req, res) => {
       <option value="week" ${dateFilter === 'week' ? 'selected' : ''}>Last 7 Days</option>
     `;
     
-    let tableRows = '';
-    if (rows.length === 0) {
-      tableRows = '<div class="no-results"><p>No recipients found.</p></div>';
-    } else {
-      tableRows = `
-        <table>
-          <tr><th>Status</th><th>Email</th><th>Name</th><th>Sent At</th><th>Clicks</th><th>Last Click</th></tr>
-      `;
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const statusText = parseInt(row.click_count) > 0 ? 'Clicked' : 'Not Clicked';
-        const statusClass = parseInt(row.click_count) > 0 ? 'status-clicked' : 'status-not-clicked';
-        
-        // Universally safe locale date formatting strings for Vercel Serverless
+    let tableRows = rows.length === 0 
+      ? '<div class="no-results"><p>No recipients found.</p></div>' 
+      : `<table><tr><th>Status</th><th>Email</th><th>Name</th><th>Sent At</th><th>Clicks</th><th>Last Click</th></tr>`;
+      
+    if (rows.length > 0) {
+      rows.forEach(row => {
         const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString() : 'Not sent yet';
         const lastClick = row.last_click ? new Date(row.last_click).toLocaleString() : '-';
-        
         tableRows += `
           <tr>
-            <td class="${statusClass}">${statusText}</td>
+            <td class="${parseInt(row.click_count) > 0 ? 'status-clicked' : 'status-not-clicked'}">${parseInt(row.click_count) > 0 ? 'Clicked' : 'Not Clicked'}</td>
             <td><strong>${escapeHTML(row.email)}</strong></td>
             <td>${escapeHTML(row.name)}</td>
             <td>${sentAt}</td>
             <td>${row.click_count}</td>
             <td>${lastClick}</td>
-          </tr>
-        `;
-      }
+          </tr>`;
+      });
       tableRows += '</table>';
     }
     
-    const html = `
+    res.send(`
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Email Tracking Dashboard</title>
+  <title>Dashboard</title>
   <style>
     * { box-sizing: border-box; }
     body { font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5; margin: 0; }
     .container { max-width: 1200px; margin: 0 auto; }
+    .header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
-    h1 { color: #333; margin-top: 0; }
-    .tabs { display: flex; gap: 5px; margin-bottom: 20px; border-bottom: 2px solid #e9ecef; flex-wrap: wrap; background: white; padding: 0 20px; border-radius: 10px 10px 0 0; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    .tab { padding: 14px 24px; cursor: pointer; border: none; background: none; font-size: 16px; color: #6c757d; border-bottom: 3px solid transparent; transition: all 0.3s; }
-    .tab:hover { color: #007bff; }
+    .tabs { display: flex; gap: 5px; margin-bottom: 20px; border-bottom: 2px solid #e9ecef; background: white; padding: 0 20px; border-radius: 10px 10px 0 0; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    .tab { padding: 14px 24px; cursor: pointer; border: none; background: none; font-size: 16px; color: #6c757d; border-bottom: 3px solid transparent; }
     .tab.active { color: #007bff; border-bottom-color: #007bff; font-weight: bold; }
     .tab-content { display: none; padding: 20px 0; }
     .tab-content.active { display: block; }
     .filter-bar { display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
-    .filter-bar label { font-weight: bold; color: #555; margin-right: 5px; }
-    .filter-bar select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; }
-    .filter-bar .btn { padding: 8px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; font-size: 14px; }
-    .filter-bar .btn:hover { background: #0056b3; }
-    .filter-bar .btn-reset { background: #6c757d; }
-    .filter-bar .btn-reset:hover { background: #5a6268; }
-    .summary { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-    .summary-card { background: #f8f9fa; padding: 15px 25px; border-radius: 8px; flex: 1; text-align: center; min-width: 100px; }
+    .filter-bar select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 5px; }
+    .btn { padding: 8px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; font-size: 14px; }
+    .summary { display: flex; gap: 20px; margin-bottom: 20px; }
+    .summary-card { background: #f8f9fa; padding: 15px 25px; border-radius: 8px; flex: 1; text-align: center; }
     .summary-card .number { font-size: 32px; font-weight: bold; color: #007bff; }
     .summary-card .number.green { color: #28a745; }
     .summary-card .number.red { color: #dc3545; }
-    .summary-card .label { color: #666; font-size: 14px; }
-    .add-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .add-form input { padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; flex: 1; min-width: 200px; }
-    .add-form button { padding: 10px 20px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }
-    .add-form button:hover { background: #218838; }
-    .add-form .message { margin-left: 10px; font-size: 14px; }
-    .add-form .message.success { color: #28a745; }
-    .add-form .message.error { color: #dc3545; }
-    .import-section { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
-    .import-section input[type="file"] { padding: 8px; border: 1px solid #ddd; border-radius: 5px; }
-    .import-section button { padding: 10px 20px; background: #17a2b8; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }
-    .import-section button:hover { background: #138496; }
-    .import-section .import-status { margin-left: 10px; font-size: 14px; }
-    .import-section .import-status.success { color: #28a745; }
-    .import-section .import-status.error { color: #dc3545; }
-    .settings-form input, .settings-form select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; }
-    .settings-form label { display: block; font-weight: bold; margin-bottom: 5px; }
-    .settings-form .form-group { margin-bottom: 15px; }
-    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    .add-form input { padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin-right: 10px; }
+    .settings-form input { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 5px; }
+    table { width: 100%; border-collapse: collapse; }
     th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-    th { background: #f8f9fa; font-weight: 600; }
+    th { background: #f8f9fa; }
     .status-clicked { color: #28a745; font-weight: bold; }
     .status-not-clicked { color: #dc3545; font-weight: bold; }
-    .no-results { text-align: center; padding: 40px; color: #999; }
-    .recipient-count { color: #666; font-size: 14px; margin-top: 10px; }
-    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
-    .btn-primary { padding: 10px 30px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
-    .btn-primary:hover { background: #0056b3; }
-    .btn-success { padding: 10px 30px; background: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; }
-    .btn-success:hover { background: #218838; }
-    .send-btn { padding: 12px 40px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }
-    .send-btn:hover { background: #0056b3; }
-    .send-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    .delete-btn { background: #dc3545; color: white; border: none; padding: 10px 25px; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold; }
-    .delete-btn:hover { background: #c82333; }
-    .delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .message { margin-left: 10px; font-size: 14px; }
-    .message.success { color: #28a745; }
-    .message.error { color: #dc3545; }
+    .delete-btn { background: #dc3545; color: white; border: none; padding: 10px 25px; border-radius: 5px; cursor: pointer; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Email Campaign Manager</h1>
+    <div class="header-bar">
+      <h1>Campaign Hub</h1>
+      <a href="/api/auth/logout" class="btn" style="background:#dc3545; font-weight:bold;">Logout Account</a>
+    </div>
     <div class="tabs">
       <button class="tab active" onclick="showTab('dashboard-tab')">Dashboard</button>
       <button class="tab" onclick="showTab('manage-tab')">Manage Recipients</button>
@@ -611,22 +577,15 @@ app.get('/dashboard', async (req, res) => {
     <div id="dashboard-tab" class="tab-content active">
       <div class="card">
         <form method="GET" action="/dashboard" class="filter-bar">
-          <div>
-            <label for="status">Status:</label>
-            <select name="status" id="status">${statusOptions}</select>
-          </div>
-          <div>
-            <label for="date">Date:</label>
-            <select name="date" id="date">${dateOptions}</select>
-          </div>
+          <select name="status">${statusOptions}</select>
+          <select name="date">${dateOptions}</select>
           <button type="submit" class="btn">Apply Filters</button>
-          <a href="/dashboard" class="btn btn-reset">Reset</a>
         </form>
       </div>
       <div class="summary">
-        <div class="summary-card"><div class="number">${totalSent}</div><div class="label">Total Sent</div></div>
-        <div class="summary-card"><div class="number green">${totalClicked}</div><div class="label">Clicked</div></div>
-        <div class="summary-card"><div class="number red">${totalNotClicked}</div><div class="label">Not Clicked</div></div>
+        <div class="summary-card"><div class="number">${totalSent}</div><div>Total Sent</div></div>
+        <div class="summary-card"><div class="number green">${totalClicked}</div><div>Clicked</div></div>
+        <div class="summary-card"><div class="number red">${totalNotClicked}</div><div>Not Clicked</div></div>
       </div>
       <div class="card">${tableRows}</div>
     </div>
@@ -634,537 +593,225 @@ app.get('/dashboard', async (req, res) => {
     <div id="manage-tab" class="tab-content">
       <div class="card">
         <h3>Add Recipient Manually</h3>
-        <form id="addForm" class="add-form" onsubmit="addRecipient(event)">
-          <input type="email" id="emailInput" placeholder="Enter email address" required>
-          <input type="text" id="nameInput" placeholder="Name (optional)">
-          <button type="submit">Add Recipient</button>
-          <span id="addMessage" class="message"></span>
+        <form class="add-form" onsubmit="addRecipient(event)">
+          <input type="email" id="emailInput" placeholder="Email Address" required>
+          <input type="text" id="nameInput" placeholder="Name">
+          <button type="submit" class="btn" style="background:#28a745;">Add</button>
+          <span id="addMessage"></span>
         </form>
       </div>
       <div class="card">
-        <h3>Import from CSV</h3>
-        <div class="import-section">
-          <form id="importForm" onsubmit="importCSV(event)">
-            <input type="file" id="csvFile" accept=".csv" required>
-            <button type="submit">Import CSV</button>
-            <span id="importStatus" class="import-status"></span>
-          </form>
-        </div>
-        <p style="font-size:12px;color:#888;margin-top:10px;">CSV must have an "email" column. <a href="#" onclick="downloadSampleCSV()">Download sample CSV</a></p>
+        <h3>Import via CSV File</h3>
+        <form onsubmit="importCSV(event)">
+          <input type="file" id="csvFile" accept=".csv" required>
+          <button type="submit" class="btn">Upload List</button>
+          <span id="importStatus"></span>
+        </form>
       </div>
-      <div class="card" style="border:2px solid #007bff;background:#f8f9ff;">
-        <h3>Send Emails</h3>
-        <p style="color:#666;font-size:14px;margin-bottom:15px;">Send emails to all recipients.</p>
-        <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;">
-          <button onclick="sendEmails()" id="sendBtn" class="send-btn">Send Emails</button>
-          <span id="sendStatus" style="font-size:14px;"></span>
-        </div>
-        <div id="sendProgress" style="margin-top:15px;"></div>
-        <div style="margin-top:15px;padding-top:15px;border-top:1px solid #e9ecef;">
-          <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:14px;">Email Subject:</label>
-          <input type="text" id="emailSubject" value="Reminder to attend meeting" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;font-size:14px;">
-        </div>
-        <div style="margin-top:15px;padding-top:15px;border-top:1px solid #e9ecef;">
-          <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:14px;">Email Template:</label>
-          <textarea id="emailTemplate" rows="6" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;font-size:14px;font-family:Arial,sans-serif;">
-<h2>Hello {name}!</h2>
-<p>Click the link below:</p>
-<p><a href="{link}">Click Here</a></p>
-<p>Or copy: {link}</p>
-          </textarea>
-          <p style="font-size:12px;color:#888;margin-top:5px;">Use {name} and {link} placeholders.</p>
-        </div>
+      <div class="card" style="background:#f8f9ff; border: 1px solid #007bff;">
+        <h3>Execute Campaign Broadcast</h3>
+        <input type="text" id="emailSubject" value="Reminder to attend meeting" style="width:100%; padding:10px; margin-bottom:10px;">
+        <textarea id="emailTemplate" rows="4" style="width:100%; padding:10px;"><h2>Hello {name}!</h2><p><a href="{link}">Click Here</a></p></textarea>
+        <button onclick="sendEmails()" id="sendBtn" class="btn" style="margin-top:10px; width:200px;">Send Emails</button>
+        <span id="sendStatus"></span>
+        <div id="sendProgress"></div>
       </div>
       <div class="card">
-        <h3>Current Recipients</h3>
-        
-        <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:15px;padding:10px;background:#f8f9fa;border-radius:8px;">
-          <button onclick="selectAllRecipients()" style="padding:6px 15px;background:#6c757d;color:white;border:none;border-radius:4px;cursor:pointer;">Select All</button>
-          <button onclick="deselectAllRecipients()" style="padding:6px 15px;background:#6c757d;color:white;border:none;border-radius:4px;cursor:pointer;">Deselect All</button>
-          <span style="color:#666;font-size:14px;" id="selectedCount">0 selected</span>
-        </div>
-        
-        <div style="display:flex;gap:10px;margin-bottom:15px;flex-wrap:wrap;">
+        <h3>Recipients Actions</h3>
+        <div style="margin-bottom:15px; display:flex; gap:10px;">
+          <button onclick="selectAllRecipients()" class="btn" style="background:#6c757d;">Select All</button>
+          <button onclick="deselectAllRecipients()" class="btn" style="background:#6c757d;">Clear Selection</button>
           <button onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" class="delete-btn">Delete Selected</button>
-          <button onclick="deleteAllRecipients()" style="padding:10px 25px;background:#dc3545;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;opacity:0.7;">Delete All</button>
-          <button onclick="deleteAllSent()" style="padding:10px 25px;background:#ff9800;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:bold;">Delete Sent</button>
+          <button onclick="deleteAllRecipients()" class="delete-btn" style="opacity:0.6;">Wipe All Data</button>
+          <button onclick="deleteAllSent()" class="btn" style="background:#ff9800;">Wipe Sent Entries</button>
         </div>
-        
-        <div id="recipientList"><p>Loading...</p></div>
+        <div id="recipientList">Loading list...</div>
       </div>
     </div>
     
     <div id="settings-tab" class="tab-content">
       <div class="card">
-        <h3>SMTP Settings</h3>
-        <p style="color:#666;font-size:14px;margin-bottom:15px;">Configure your email server settings.</p>
-        <form id="settingsForm" class="settings-form" onsubmit="saveSettings(event)">
-          <div class="form-group">
-            <label for="smtpHost">SMTP Host:</label>
-            <input type="text" id="smtpHost" placeholder="smtp.gmail.com">
-          </div>
-          <div class="form-group">
-            <label for="smtpPort">SMTP Port:</label>
-            <input type="number" id="smtpPort" placeholder="587">
-          </div>
-          <div class="form-group">
-            <label for="senderEmail">Sender Email:</label>
-            <input type="email" id="senderEmail" placeholder="your-email@gmail.com">
-          </div>
-          <div class="form-group">
-            <label for="senderPassword">Password / App Password:</label>
-            <input type="password" id="senderPassword" placeholder="your-app-password">
-          </div>
-          <div class="form-group">
-            <label for="smtpSecure">Secure Connection:</label>
-            <select id="smtpSecure">
-              <option value="0">No (Port 587 - TLS)</option>
-              <option value="1">Yes (Port 465 - SSL)</option>
-            </select>
-          </div>
-          <div class="btn-group">
-            <button type="submit" class="btn-primary">Save Settings</button>
-            <button type="button" class="btn-success" onclick="testSettings()">Test Connection</button>
-          </div>
-          <div id="settingsMessage" style="margin-top:15px;font-weight:bold;"></div>
+        <h3>User SMTP Settings Profile</h3>
+        <form class="settings-form" onsubmit="saveSettings(event)">
+          <input type="text" id="smtpHost" placeholder="SMTP Host">
+          <input type="number" id="smtpPort" placeholder="SMTP Port">
+          <input type="email" id="senderEmail" placeholder="Sender Email Address">
+          <input type="password" id="senderPassword" placeholder="App Password">
+          <select id="smtpSecure" style="width:100%; padding:10px; margin-bottom:15px;"><option value="0">TLS (587)</option><option value="1">SSL (465)</option></select>
+          <button type="submit" class="btn">Save Configuration</button>
+          <button type="button" class="btn" style="background:#28a745;" onclick="testSettings()">Test Endpoint Connection</button>
+          <div id="settingsMessage" style="margin-top:10px; font-weight:bold;"></div>
         </form>
       </div>
     </div>
   </div>
 
   <script>
-    // Fixed Single Page Application (SPA) Tab System Component Router
     function showTab(tabId) {
-      var contents = document.querySelectorAll('.tab-content');
-      contents.forEach(content => content.classList.remove('active'));
-      
-      var tabs = document.querySelectorAll('.tab');
-      tabs.forEach(tab => tab.classList.remove('active'));
-      
-      var selectedContent = document.getElementById(tabId);
-      if (selectedContent) {
-        selectedContent.classList.add('active');
-      }
-      
-      tabs.forEach(tab => {
-        const clickAttr = tab.getAttribute('onclick') || '';
-        if (clickAttr.includes(tabId)) {
-          tab.classList.add('active');
-        }
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      var target = document.getElementById(tabId);
+      if (target) target.classList.add('active');
+      document.querySelectorAll('.tab').forEach(t => {
+        if(t.getAttribute('onclick').includes(tabId)) t.classList.add('active');
       });
-
-      if (tabId === 'manage-tab') {
-        loadRecipients();
-      }
-      if (tabId === 'settings-tab') {
-        loadSettings();
-      }
+      if (tabId === 'manage-tab') loadRecipients();
+      if (tabId === 'settings-tab') loadSettings();
     }
 
     async function loadSettings() {
-      try {
-        var response = await fetch('/api/settings');
-        var data = await response.json();
-        if (data) {
-          document.getElementById('smtpHost').value = data.smtp_host || '';
-          document.getElementById('smtpPort').value = data.smtp_port || 587;
-          document.getElementById('senderEmail').value = data.sender_email || '';
-          document.getElementById('senderPassword').value = data.sender_password || '';
-          document.getElementById('smtpSecure').value = data.smtp_secure || 0;
-        }
-      } catch (error) {
-        console.error('Error loading settings:', error);
+      var r = await fetch('/api/settings');
+      var d = await r.json();
+      if(d) {
+        document.getElementById('smtpHost').value = d.smtp_host || '';
+        document.getElementById('smtpPort').value = d.smtp_port || '';
+        document.getElementById('senderEmail').value = d.sender_email || '';
+        document.getElementById('senderPassword').value = d.sender_password || '';
+        document.getElementById('smtpSecure').value = d.smtp_secure || 0;
       }
     }
 
-    async function saveSettings(event) {
-      event.preventDefault();
-      var messageEl = document.getElementById('settingsMessage');
-      var settings = {
+    async function saveSettings(e) {
+      e.preventDefault();
+      var msg = document.getElementById('settingsMessage');
+      var payload = {
         smtp_host: document.getElementById('smtpHost').value,
-        smtp_port: parseInt(document.getElementById('smtpPort').value),
-        smtp_secure: parseInt(document.getElementById('smtpSecure').value),
+        smtp_port: document.getElementById('smtpPort').value,
         sender_email: document.getElementById('senderEmail').value,
-        sender_password: document.getElementById('senderPassword').value
+        sender_password: document.getElementById('senderPassword').value,
+        smtp_secure: document.getElementById('smtpSecure').value
       };
-      try {
-        var response = await fetch('/api/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(settings)
-        });
-        var data = await response.json();
-        if (response.ok) {
-          messageEl.textContent = 'Success: ' + data.message;
-          messageEl.style.color = '#28a745';
-        } else {
-          messageEl.textContent = 'Error: ' + data.error;
-          messageEl.style.color = '#dc3545';
-        }
-      } catch (error) {
-        messageEl.textContent = 'Error: ' + error.message;
-        messageEl.style.color = '#dc3545';
-      }
+      var r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+      var d = await r.json();
+      msg.textContent = r.ok ? d.message : d.error;
+      msg.style.color = r.ok ? '#28a745' : '#dc3545';
     }
 
     async function testSettings() {
-      var messageEl = document.getElementById('settingsMessage');
-      messageEl.textContent = 'Testing connection...';
-      messageEl.style.color = '#007bff';
-      var settings = {
+      var msg = document.getElementById('settingsMessage');
+      msg.textContent = 'Testing connection parameters...';
+      var payload = {
         smtp_host: document.getElementById('smtpHost').value,
-        smtp_port: parseInt(document.getElementById('smtpPort').value),
-        smtp_secure: parseInt(document.getElementById('smtpSecure').value),
+        smtp_port: document.getElementById('smtpPort').value,
         sender_email: document.getElementById('senderEmail').value,
-        sender_password: document.getElementById('senderPassword').value
+        sender_password: document.getElementById('senderPassword').value,
+        smtp_secure: document.getElementById('smtpSecure').value
       };
-      try {
-        var response = await fetch('/api/settings/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(settings)
-        });
-        var data = await response.json();
-        if (response.ok) {
-          messageEl.textContent = 'Success: ' + data.message;
-          messageEl.style.color = '#28a745';
-        } else {
-          messageEl.textContent = 'Error: ' + data.error;
-          messageEl.style.color = '#dc3545';
-        }
-      } catch (error) {
-        messageEl.textContent = 'Error: ' + error.message;
-        messageEl.style.color = '#dc3545';
-      }
+      var r = await fetch('/api/settings/test', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+      var d = await r.json();
+      msg.textContent = r.ok ? d.message : d.error;
+      msg.style.color = r.ok ? '#28a745' : '#dc3545';
     }
 
-    async function addRecipient(event) {
-      event.preventDefault();
+    async function addRecipient(e) {
+      e.preventDefault();
       var email = document.getElementById('emailInput').value;
       var name = document.getElementById('nameInput').value;
-      var messageEl = document.getElementById('addMessage');
-      try {
-        var response = await fetch('/api/recipients', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: email, name: name })
-        });
-        var data = await response.json();
-        if (response.ok) {
-          messageEl.textContent = data.message;
-          messageEl.className = 'message success';
-          document.getElementById('emailInput').value = '';
-          document.getElementById('nameInput').value = '';
-          loadRecipients();
-        } else {
-          messageEl.textContent = data.error;
-          messageEl.className = 'message error';
-        }
-      } catch (error) {
-        messageEl.textContent = 'Error: ' + error.message;
-        messageEl.className = 'message error';
-      }
+      var r = await fetch('/api/recipients', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, name}) });
+      var d = await r.json();
+      document.getElementById('addMessage').textContent = d.message || d.error;
+      if(r.ok) { document.getElementById('emailInput').value = ''; document.getElementById('nameInput').value = ''; loadRecipients(); }
     }
 
-    async function importCSV(event) {
-      event.preventDefault();
-      var fileInput = document.getElementById('csvFile');
-      var statusEl = document.getElementById('importStatus');
-      if (!fileInput.files.length) {
-        statusEl.textContent = 'Please select a file';
-        statusEl.className = 'import-status error';
-        return;
-      }
-      var formData = new FormData();
-      formData.append('csvFile', fileInput.files[0]);
-      try {
-        var response = await fetch('/api/recipients/import', {
-          method: 'POST',
-          body: formData
-        });
-        var data = await response.json();
-        if (response.ok) {
-          statusEl.textContent = data.message;
-          statusEl.className = 'import-status success';
-          fileInput.value = '';
-          loadRecipients();
-        } else {
-          statusEl.textContent = data.error;
-          statusEl.className = 'import-status error';
-        }
-      } catch (error) {
-        statusEl.textContent = 'Error: ' + error.message;
-        statusEl.className = 'import-status error';
-      }
+    async function importCSV(e) {
+      e.preventDefault();
+      var fd = new FormData();
+      fd.append('csvFile', document.getElementById('csvFile').files[0]);
+      var r = await fetch('/api/recipients/import', { method:'POST', body:fd });
+      var d = await r.json();
+      document.getElementById('importStatus').textContent = d.message || d.error;
+      if(r.ok) loadRecipients();
     }
 
     async function loadRecipients() {
       var container = document.getElementById('recipientList');
-      try {
-        var response = await fetch('/api/recipients');
-        var data = await response.json();
-        if (data.length === 0) {
-          container.innerHTML = '<p style="color:#999;">No recipients added yet.</p>';
-          var countEl = document.getElementById('selectedCount');
-          if (countEl) countEl.textContent = '0 selected';
-          return;
-        }
-        var html = '';
-        html += '<div class="recipient-count">Total: ' + data.length + ' recipients</div>';
-        html += '<div style="overflow-x:auto;">';
-        html += '<table style="width:100%;border-collapse:collapse;margin-top:10px;">';
-        html += '<thead>';
-        html += '<tr style="background:#f8f9fa;">';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;width:40px;">';
-        html += '<input type="checkbox" id="selectAllCheckbox" onchange="toggleAllCheckboxes()">';
-        html += '</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Email</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Name</th>';
-        html += '<th style="padding:10px;text-align:left;border-bottom:1px solid #ddd;">Status</th>';
+      var r = await fetch('/api/recipients');
+      var d = await r.json();
+      if(!d || d.length === 0) { container.innerHTML = '<p>List completely empty.</p>'; return; }
+      
+      var html = '<table><tr><th><input type="checkbox" id="masterCheck" onchange="toggleAll()"></th><th>Email</th><th>Name</th><th>Status</th></tr>';
+      
+      d.forEach(function(row) {
+        var statusText = row.sent_at ? 'Sent' : 'Pending';
+        var statusColor = row.sent_at ? '#28a745' : '#ff9800';
+        
+        html += '<tr>';
+        html += '<td><input type="checkbox" class="rec-check" value="' + row.email + '"></td>';
+        html += '<td>' + row.email + '</td>';
+        html += '<td>' + row.name + '</td>';
+        html += '<td style="color:' + statusColor + '">' + statusText + '</td>';
         html += '</tr>';
-        html += '</thead>';
-        html += '<tbody>';
-        for (var i = 0; i < data.length; i++) {
-          var row = data[i];
-          var status = row.sent_at ? 'Sent' : 'Pending';
-          var statusColor = row.sent_at ? '#28a745' : '#ff9800';
-          html += '<tr style="border-bottom:1px solid #eee;">';
-          html += '<td style="padding:10px;">';
-          html += '<input type="checkbox" class="recipient-checkbox" value="' + row.email + '" onchange="updateSelectedCount()">';
-          html += '</td>';
-          html += '<td style="padding:10px;"><strong>' + row.email + '</strong></td>';
-          html += '<td style="padding:10px;">' + row.name + '</td>';
-          html += '<td style="padding:10px;color:' + statusColor + ';font-weight:bold;">' + status + '</td>';
-          html += '</tr>';
-        }
-        html += '</tbody>';
-        html += '</table>';
-        html += '</div>';
-        container.innerHTML = html;
-        updateSelectedCount();
-      } catch (error) {
-        container.innerHTML = '<p style="color:red;">Error loading recipients</p>';
-      }
+      });
+      
+      html += '</table>';
+      container.innerHTML = html;
     }
 
-    function downloadSampleCSV() {
-      var content = 'email,name\\nalice@example.com,Alice\\nbob@example.com,Bob\\ncharlie@example.com,Charlie';
-      var blob = new Blob([content], { type: 'text/csv' });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = 'sample_recipients.csv';
-      a.click();
-      URL.revokeObjectURL(url);
+    function toggleAll() {
+      var m = document.getElementById('masterCheck').checked;
+      document.querySelectorAll('.rec-check').forEach(c => c.checked = m);
     }
+    function selectAllRecipients() { document.querySelectorAll('.rec-check').forEach(c => c.checked = true); }
+    function deselectAllRecipients() { document.querySelectorAll('.rec-check').forEach(c => c.checked = false); }
 
-    async function sendEmails() {
-      var sendBtn = document.getElementById('sendBtn');
-      var statusEl = document.getElementById('sendStatus');
-      var progressEl = document.getElementById('sendProgress');
-      var subject = document.getElementById('emailSubject').value;
-      var template = document.getElementById('emailTemplate').value;
-      sendBtn.disabled = true;
-      sendBtn.textContent = 'Sending...';
-      statusEl.textContent = '';
-      statusEl.style.color = '#007bff';
-      progressEl.innerHTML = '';
-      try {
-        var response = await fetch('/api/send-emails', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subject: subject, template: template })
-        });
-        var data = await response.json();
-        if (response.ok) {
-          statusEl.textContent = 'Success: ' + data.message;
-          statusEl.style.color = '#28a745';
-          if (data.results) {
-            var html = '<div style="margin-top:10px;background:#f8f9fa;padding:10px;border-radius:5px;max-height:200px;overflow-y:auto;">';
-            html += '<table style="width:100%;font-size:13px;">';
-            html += '<tr><th>Email</th><th>Status</th></tr>';
-            for (var i = 0; i < data.results.length; i++) {
-              var result = data.results[i];
-              var color = result.status === 'sent' ? '#28a745' : '#dc3545';
-              html += '<tr><td>' + result.email + '</td><td style="color:' + color + ';font-weight:bold;">' + result.status + '</td></tr>';
-            }
-            html += '</table></div>';
-            progressEl.innerHTML = html;
-          }
-          loadRecipients();
-          setTimeout(function() { window.location.reload(); }, 3000);
-        } else {
-          statusEl.textContent = 'Error: ' + data.error;
-          statusEl.style.color = '#dc3545';
-        }
-      } catch (error) {
-        statusEl.textContent = 'Error: ' + error.message;
-        statusEl.style.color = '#dc3545';
-      } finally {
-        sendBtn.disabled = false;
-        sendBtn.textContent = 'Send Emails';
-      }
+    function getSelected() {
+      var arr = [];
+      document.querySelectorAll('.rec-check:checked').forEach(c => arr.push(c.value));
+      return arr;
     }
-
-    // ============================================
-// REVISED SELECTION & COMPLETE BULK DELETIONS (FRONTEND)
-// ============================================
 
     async function deleteSelectedRecipients() {
-      var selected = getSelectedEmails();
-      if (selected.length === 0) {
-        alert('Please select at least one recipient.');
-        return;
-      }
-      
-      var confirmMsg = selected.length === 1 
-        ? 'Delete this selected recipient record?' 
-        : 'Delete all ' + selected.length + ' selected recipient records?';
-        
-      if (!confirm(confirmMsg)) return;
-      
-      var deleteBtn = document.getElementById('deleteSelectedBtn');
-      deleteBtn.disabled = true;
-      deleteBtn.textContent = 'Deleting...';
-      
-      try {
-        var response = await fetch('/api/recipients/bulk-delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ emails: selected })
-        });
-        var data = await response.json();
-        if (response.ok) {
-          alert(data.message);
-          loadRecipients();
-        } else {
-          alert('Error: ' + data.error);
-        }
-      } catch (error) {
-        alert('Error: ' + error.message);
-      } finally {
-        deleteBtn.disabled = false;
-        deleteBtn.textContent = 'Delete Selected';
-      }
+      var items = getSelected();
+      if(items.length === 0) return alert('Select items to drop.');
+      if(!confirm('Drop selected targets?')) return;
+      var r = await fetch('/api/recipients/bulk-delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({emails:items}) });
+      if(r.ok) loadRecipients();
     }
 
     async function deleteAllRecipients() {
-      if (!confirm('Are you sure you want to completely clear out ALL recipients and historical track logs? This cannot be undone.')) return;
-      try {
-        var response = await fetch('/api/recipients/all', { method: 'DELETE' });
-        var data = await response.json();
-        if (response.ok) { 
-          alert(data.message);
-          loadRecipients(); 
-        } else { 
-          alert('Error: ' + data.error); 
-        }
-      } catch (error) { 
-        alert('Error: ' + error.message); 
-      }
+      if(!confirm('Clear entire profile collection database?')) return;
+      await fetch('/api/recipients/all', { method:'DELETE' });
+      loadRecipients();
     }
 
     async function deleteAllSent() {
-      if (!confirm('Clear out all active campaign records that have a valid "Sent At" confirmation timestamp?')) return;
-      try {
-        var response = await fetch('/api/recipients/sent', { method: 'DELETE' });
-        var data = await response.json();
-        if (response.ok) { 
-          alert(data.message);
-          loadRecipients(); 
-        } else { 
-          alert('Error: ' + data.error); 
-        }
-      } catch (error) { 
-        alert('Error: ' + error.message); 
-      }
-    }
-
-    function updateSelectedCount() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
-      var count = checkboxes.length;
-      var countEl = document.getElementById('selectedCount');
-      if (countEl) countEl.textContent = count + ' selected';
-      var deleteBtn = document.getElementById('deleteSelectedBtn');
-      if (deleteBtn) {
-        deleteBtn.disabled = count === 0;
-        deleteBtn.style.opacity = count === 0 ? '0.5' : '1';
-      }
-    }
-
-    function toggleAllCheckboxes() {
-      var masterCheckbox = document.getElementById('selectAllCheckbox');
-      var checkboxes = document.querySelectorAll('.recipient-checkbox');
-      for (var i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].checked = masterCheckbox.checked;
-      }
-      updateSelectedCount();
-    }
-
-    function selectAllRecipients() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox');
-      for (var i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].checked = true;
-      }
-      var masterCheckbox = document.getElementById('selectAllCheckbox');
-      if (masterCheckbox) masterCheckbox.checked = true;
-      updateSelectedCount();
-    }
-
-    function deselectAllRecipients() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox');
-      for (var i = 0; i < checkboxes.length; i++) {
-        checkboxes[i].checked = false;
-      }
-      var masterCheckbox = document.getElementById('selectAllCheckbox');
-      if (masterCheckbox) masterCheckbox.checked = false;
-      updateSelectedCount();
-    }
-
-    function getSelectedEmails() {
-      var checkboxes = document.querySelectorAll('.recipient-checkbox:checked');
-      var emails = [];
-      for (var i = 0; i < checkboxes.length; i++) {
-        emails.push(checkboxes[i].value);
-      }
-      return emails;
-    }
-
-    document.addEventListener('DOMContentLoaded', function() {
+      if(!confirm('Clear sent profile records?')) return;
+      await fetch('/api/recipients/sent', { method:'DELETE' });
       loadRecipients();
-      loadSettings();
-    });
+    }
+
+    async function sendEmails() {
+      var btn = document.getElementById('sendBtn');
+      btn.disabled = true; btn.textContent = 'Processing...';
+      var r = await fetch('/api/send-emails', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ subject: document.getElementById('emailSubject').value, template: document.getElementById('emailTemplate').value })
+      });
+      if(r.ok) { alert('Broadcast processing complete.'); window.location.reload(); }
+      btn.disabled = false; btn.textContent = 'Send Emails';
+    }
+
+    document.addEventListener('DOMContentLoaded', () => { loadRecipients(); loadSettings(); });
   </script>
 </body>
 </html>
-    `;
-    
-    res.send(html);
+    `);
   } catch (error) {
-    res.send('<h2>Error: ' + error.message + '</h2>');
+    res.send('<h2>Error loading secure dashboard asset layout: ' + error.message + '</h2>');
   }
 });
 
 app.get('/clicked-link-page', (req, res) => {
-  const name = req.query.name || 'there';
-  
   res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><title>Thank You!</title></head>
-    <body style="font-family:Arial;text-align:center;padding:50px;">
-      <h1>THIS WAS A SECURITY TEST ${escapeHTML(name)}!</h1>
-      <p>You have failed The Security test.</p>
-      <p>Please be more cautious.</p>
-    </body>
-    </html>
+    <!DOCTYPE html><html><body style="font-family:Arial;text-align:center;padding:50px;">
+      <h1>SECURITY COMPLIANCE TEST AUDIT CHECKPOINT REACHED</h1>
+      <p>This engagement simulator logged an untrusted click entry flag targeting: \${escapeHTML(req.query.email || 'Unknown Client Domain Context')}</p>
+    </body></html>
   `);
 });
 
-// Port listener explicitly set to support server execution
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('Server running on port', PORT);
-});
+app.listen(PORT, () => { console.log('Multi-tenant tracker listening on port', PORT); });
 
 module.exports = app;
