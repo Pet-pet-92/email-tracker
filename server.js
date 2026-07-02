@@ -13,15 +13,16 @@ app.use(express.urlencoded({ extended: true }));
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
+// Serverless-optimized connection pool config
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
+  max: 1, // Restricts per-instance connection exhaustion on Vercel
 });
 
 pool.connect((err) => {
   if (err) {
     console.error('Error connecting to PostgreSQL:', err.stack);
-    process.exit(1);
   } else {
     console.log('Connected to PostgreSQL!');
   }
@@ -32,60 +33,13 @@ async function query(text, params) {
   return res;
 }
 
-async function createTables() {
-  try {
-    await query(`
-      CREATE TABLE IF NOT EXISTS recipients (
-        id TEXT PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        name TEXT,
-        link TEXT,
-        sent_at TIMESTAMP
-      )
-    `);
-    console.log('Recipients table ready');
-
-    await query(`
-      CREATE TABLE IF NOT EXISTS clicks (
-        id SERIAL PRIMARY KEY,
-        recipient_id TEXT REFERENCES recipients(id),
-        email TEXT,
-        timestamp TIMESTAMP,
-        user_agent TEXT,
-        ip TEXT
-      )
-    `);
-    console.log('Clicks table ready');
-
-    await query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        id SERIAL PRIMARY KEY,
-        smtp_host TEXT,
-        smtp_port INTEGER,
-        smtp_secure INTEGER,
-        sender_email TEXT,
-        sender_password TEXT,
-        updated_at TIMESTAMP
-      )
-    `);
-    console.log('Settings table ready');
-
-    const settingsCheck = await query('SELECT COUNT(*) FROM settings');
-    if (parseInt(settingsCheck.rows[0].count) === 0) {
-      await query(`
-        INSERT INTO settings (smtp_host, smtp_port, smtp_secure, sender_email, sender_password, updated_at)
-        VALUES ($1, $2, $3, $4, $5, NOW())
-      `, ['smtp.gmail.com', 587, 0, '', '']);
-      console.log('Default settings inserted');
-    }
-
-    console.log('Database is ready!');
-  } catch (err) {
-    console.error('Error creating tables:', err);
-  }
+// Security sanitization to protect against Cross-Site Scripting (XSS)
+function escapeHTML(str) {
+  if (!str) return '';
+  return str.replace(/[&<>'"]/g, 
+    tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
+  );
 }
-
-createTables();
 
 function generateLinks(recipients) {
   const results = [];
@@ -111,6 +65,7 @@ function generateLinks(recipients) {
   return results;
 }
 
+// Sequential, rate-limited email distribution function to prevent SMTP blocking
 async function sendEmails(recipients, customSubject, customTemplate) {
   const settingsResult = await query('SELECT * FROM settings ORDER BY id DESC LIMIT 1');
   const settings = settingsResult.rows[0];
@@ -138,19 +93,16 @@ async function sendEmails(recipients, customSubject, customTemplate) {
 <p>Or copy: {link}</p>
   `;
 
-  const sendPromises = recipients.map(async (person) => {
+  for (const person of recipients) {
     const existingResult = await query('SELECT id, link, name FROM recipients WHERE email = $1', [person.email]);
     const existingRecipient = existingResult.rows[0];
     
     if (!existingRecipient) {
       sentEmails.push({ email: person.email, status: 'failed', error: 'Recipient not found' });
-      return;
+      continue;
     }
     
-    const link = existingRecipient.link;
-    const name = existingRecipient.name;
-    
-    let htmlContent = template.replace(/{name}/g, name).replace(/{link}/g, link);
+    let htmlContent = template.replace(/{name}/g, existingRecipient.name).replace(/{link}/g, existingRecipient.link);
     
     const mailOptions = {
       from: settings.sender_email,
@@ -164,13 +116,15 @@ async function sendEmails(recipients, customSubject, customTemplate) {
       await query('UPDATE recipients SET sent_at = NOW() WHERE email = $1', [person.email]);
       sentEmails.push({ email: person.email, status: 'sent' });
       console.log('Email sent to', person.email);
+      
+      // 200ms cooldown delay to pace SMTP connections safely on serverless runs
+      await new Promise(resolve => setTimeout(resolve, 200));
     } catch (error) {
       console.error('Failed to send to', person.email, error.message);
       sentEmails.push({ email: person.email, status: 'failed', error: error.message });
     }
-  });
+  }
 
-  await Promise.all(sendPromises);
   return sentEmails;
 }
 
@@ -219,8 +173,7 @@ app.get('/api/recipients', async (req, res) => {
 });
 
 app.post('/api/recipients', async (req, res) => {
-  const email = req.body.email;
-  const name = req.body.name;
+  const { email, name } = req.body;
   
   if (!email) {
     return res.status(400).json({ error: 'Email is required' });
@@ -401,7 +354,6 @@ app.post('/api/send-emails', async (req, res) => {
       for (const person of trackingData) {
         await query('UPDATE recipients SET link = $1 WHERE email = $2', [person.link, person.email]);
       }
-      console.log('Links generated for all recipients');
     }
     
     const settingsResult = await query('SELECT * FROM settings ORDER BY id DESC LIMIT 1');
@@ -426,12 +378,19 @@ app.post('/api/send-emails', async (req, res) => {
   }
 });
 
-app.delete('/api/recipients/:email', async (req, res) => {
-  const email = req.params.email;
+// ============================================
+// DELETION API ENDPOINTS (CORRECTED & BULK DEPLOYED)
+// ============================================
+
+app.post('/api/recipients/bulk-delete', async (req, res) => {
+  const { emails } = req.body;
+  if (!emails || !Array.isArray(emails) || emails.length === 0) {
+    return res.status(400).json({ error: 'No recipient rows selected.' });
+  }
   try {
-    await query('DELETE FROM clicks WHERE email = $1', [email]);
-    await query('DELETE FROM recipients WHERE email = $1', [email]);
-    res.json({ success: true, message: 'Recipient deleted successfully' });
+    await query('DELETE FROM clicks WHERE email = ANY($1)', [emails]);
+    const deleteResult = await query('DELETE FROM recipients WHERE email = ANY($1)', [emails]);
+    res.json({ success: true, message: `Successfully deleted ${deleteResult.rowCount} recipient(s).` });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -441,7 +400,7 @@ app.delete('/api/recipients/all', async (req, res) => {
   try {
     await query('DELETE FROM clicks');
     await query('DELETE FROM recipients');
-    res.json({ success: true, message: 'All recipients deleted successfully' });
+    res.json({ success: true, message: 'All recipients cleared successfully!' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -452,11 +411,11 @@ app.delete('/api/recipients/sent', async (req, res) => {
     const sentResult = await query('SELECT email FROM recipients WHERE sent_at IS NOT NULL');
     const emails = sentResult.rows.map(r => r.email);
     if (emails.length === 0) {
-      return res.json({ success: true, message: 'No sent recipients to delete' });
+      return res.json({ success: true, message: 'No sent records to clear.' });
     }
     await query('DELETE FROM clicks WHERE email = ANY($1)', [emails]);
     await query('DELETE FROM recipients WHERE sent_at IS NOT NULL');
-    res.json({ success: true, message: 'Sent recipients deleted successfully' });
+    res.json({ success: true, message: 'Sent records wiped successfully!' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -471,28 +430,8 @@ app.get('/debug/recipients', async (req, res) => {
   }
 });
 
-app.get('/results', async (req, res) => {
-  try {
-    const result = await query(`
-      SELECT 
-        r.email,
-        r.name,
-        r.sent_at,
-        COUNT(c.id) as click_count,
-        MAX(c.timestamp) as last_click
-      FROM recipients r
-      LEFT JOIN clicks c ON r.id = c.recipient_id
-      GROUP BY r.id, r.email, r.name, r.sent_at
-      ORDER BY r.sent_at DESC
-    `);
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // ============================================
-// DASHBOARD
+// DASHBOARD VIEW LAYER
 // ============================================
 app.get('/dashboard', async (req, res) => {
   const statusFilter = req.query.status || 'all';
@@ -567,13 +506,16 @@ app.get('/dashboard', async (req, res) => {
         const row = rows[i];
         const statusText = parseInt(row.click_count) > 0 ? 'Clicked' : 'Not Clicked';
         const statusClass = parseInt(row.click_count) > 0 ? 'status-clicked' : 'status-not-clicked';
-        const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Not sent yet';
-        const lastClick = row.last_click ? new Date(row.last_click).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : '-';
+        
+        // Universally safe locale date formatting strings for Vercel Serverless
+        const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString() : 'Not sent yet';
+        const lastClick = row.last_click ? new Date(row.last_click).toLocaleString() : '-';
+        
         tableRows += `
           <tr>
             <td class="${statusClass}">${statusText}</td>
-            <td><strong>${row.email}</strong></td>
-            <td>${row.name}</td>
+            <td><strong>${escapeHTML(row.email)}</strong></td>
+            <td>${escapeHTML(row.name)}</td>
             <td>${sentAt}</td>
             <td>${row.click_count}</td>
             <td>${lastClick}</td>
@@ -645,7 +587,7 @@ app.get('/dashboard', async (req, res) => {
     .send-btn { padding: 12px 40px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }
     .send-btn:hover { background: #0056b3; }
     .send-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    .delete-btn { background: #dc3545; color: white; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .delete-btn { background: #dc3545; color: white; border: none; padding: 10px 25px; border-radius: 5px; cursor: pointer; font-size: 14px; font-weight: bold; }
     .delete-btn:hover { background: #c82333; }
     .delete-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .message { margin-left: 10px; font-size: 14px; }
@@ -787,25 +729,26 @@ app.get('/dashboard', async (req, res) => {
   </div>
 
   <script>
+    // Fixed Single Page Application (SPA) Tab System Component Router
     function showTab(tabId) {
       var contents = document.querySelectorAll('.tab-content');
-      for (var i = 0; i < contents.length; i++) {
-        contents[i].classList.remove('active');
-      }
+      contents.forEach(content => content.classList.remove('active'));
+      
       var tabs = document.querySelectorAll('.tab');
-      for (var i = 0; i < tabs.length; i++) {
-        tabs[i].classList.remove('active');
-      }
+      tabs.forEach(tab => tab.classList.remove('active'));
+      
       var selectedContent = document.getElementById(tabId);
       if (selectedContent) {
         selectedContent.classList.add('active');
       }
-      var buttons = document.querySelectorAll('.tab');
-      for (var i = 0; i < buttons.length; i++) {
-        if (buttons[i].getAttribute('onclick') && buttons[i].getAttribute('onclick').indexOf(tabId) !== -1) {
-          buttons[i].classList.add('active');
+      
+      tabs.forEach(tab => {
+        const clickAttr = tab.getAttribute('onclick') || '';
+        if (clickAttr.includes(tabId)) {
+          tab.classList.add('active');
         }
-      }
+      });
+
       if (tabId === 'manage-tab') {
         loadRecipients();
       }
@@ -1059,24 +1002,78 @@ app.get('/dashboard', async (req, res) => {
       }
     }
 
+    // ============================================
+// REVISED SELECTION & COMPLETE BULK DELETIONS (FRONTEND)
+// ============================================
+
+    async function deleteSelectedRecipients() {
+      var selected = getSelectedEmails();
+      if (selected.length === 0) {
+        alert('Please select at least one recipient.');
+        return;
+      }
+      
+      var confirmMsg = selected.length === 1 
+        ? 'Delete this selected recipient record?' 
+        : 'Delete all ' + selected.length + ' selected recipient records?';
+        
+      if (!confirm(confirmMsg)) return;
+      
+      var deleteBtn = document.getElementById('deleteSelectedBtn');
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = 'Deleting...';
+      
+      try {
+        var response = await fetch('/api/recipients/bulk-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ emails: selected })
+        });
+        var data = await response.json();
+        if (response.ok) {
+          alert(data.message);
+          loadRecipients();
+        } else {
+          alert('Error: ' + data.error);
+        }
+      } catch (error) {
+        alert('Error: ' + error.message);
+      } finally {
+        deleteBtn.disabled = false;
+        deleteBtn.textContent = 'Delete Selected';
+      }
+    }
+
     async function deleteAllRecipients() {
-      if (!confirm('Delete ALL recipients?')) return;
+      if (!confirm('Are you sure you want to completely clear out ALL recipients and historical track logs? This cannot be undone.')) return;
       try {
         var response = await fetch('/api/recipients/all', { method: 'DELETE' });
         var data = await response.json();
-        if (response.ok) { loadRecipients(); }
-        else { alert('Error: ' + data.error); }
-      } catch (error) { alert('Error: ' + error.message); }
+        if (response.ok) { 
+          alert(data.message);
+          loadRecipients(); 
+        } else { 
+          alert('Error: ' + data.error); 
+        }
+      } catch (error) { 
+        alert('Error: ' + error.message); 
+      }
     }
 
     async function deleteAllSent() {
-      if (!confirm('Delete all sent recipients?')) return;
+      if (!confirm('Clear out all active campaign records that have a valid "Sent At" confirmation timestamp?')) return;
       try {
         var response = await fetch('/api/recipients/sent', { method: 'DELETE' });
         var data = await response.json();
-        if (response.ok) { loadRecipients(); }
-        else { alert('Error: ' + data.error); }
-      } catch (error) { alert('Error: ' + error.message); }
+        if (response.ok) { 
+          alert(data.message);
+          loadRecipients(); 
+        } else { 
+          alert('Error: ' + data.error); 
+        }
+      } catch (error) { 
+        alert('Error: ' + error.message); 
+      }
     }
 
     function updateSelectedCount() {
@@ -1129,49 +1126,6 @@ app.get('/dashboard', async (req, res) => {
       return emails;
     }
 
-    async function deleteSelectedRecipients() {
-      var selected = getSelectedEmails();
-      if (selected.length === 0) {
-        alert('Please select at least one recipient.');
-        return;
-      }
-      if (!confirm('Delete ' + selected.length + ' selected recipient(s)?')) return;
-      var deleteBtn = document.getElementById('deleteSelectedBtn');
-      deleteBtn.disabled = true;
-      deleteBtn.textContent = 'Deleting...';
-      try {
-        var deleted = 0;
-        var failed = 0;
-        var errorMessages = [];
-        for (var i = 0; i < selected.length; i++) {
-          var email = selected[i];
-          try {
-            var response = await fetch('/api/recipients/' + encodeURIComponent(email), { method: 'DELETE' });
-            var data = await response.json();
-            if (response.ok) { deleted++; } 
-            else { 
-              failed++; 
-              errorMessages.push(email + ': ' + (data.error || 'Unknown error'));
-            }
-          } catch (error) {
-            failed++;
-            errorMessages.push(email + ': ' + error.message);
-          }
-        }
-        if (failed > 0) {
-          alert('Deleted ' + deleted + ' recipient(s). ' + failed + ' failed.\n\nErrors:\n' + errorMessages.join('\n'));
-        } else {
-          alert('Deleted ' + deleted + ' recipient(s) successfully.');
-        }
-        loadRecipients();
-      } catch (error) {
-        alert('Error: ' + error.message);
-      } finally {
-        deleteBtn.disabled = false;
-        deleteBtn.textContent = 'Delete Selected';
-      }
-    }
-
     document.addEventListener('DOMContentLoaded', function() {
       loadRecipients();
       loadSettings();
@@ -1188,7 +1142,6 @@ app.get('/dashboard', async (req, res) => {
 });
 
 app.get('/clicked-link-page', (req, res) => {
-  const email = req.query.email || 'Guest';
   const name = req.query.name || 'there';
   
   res.send(`
@@ -1196,7 +1149,7 @@ app.get('/clicked-link-page', (req, res) => {
     <html>
     <head><title>Thank You!</title></head>
     <body style="font-family:Arial;text-align:center;padding:50px;">
-      <h1>THIS WAS A SECURITY TEST ${name}!</h1>
+      <h1>THIS WAS A SECURITY TEST ${escapeHTML(name)}!</h1>
       <p>You have failed The Security test.</p>
       <p>Please be more cautious.</p>
     </body>
@@ -1204,12 +1157,10 @@ app.get('/clicked-link-page', (req, res) => {
   `);
 });
 
+// Port listener explicitly set to support server execution
 const PORT = process.env.PORT || 3000;
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => {
-    console.log('Server running on port', PORT);
-    console.log('Dashboard: http://localhost:' + PORT + '/dashboard');
-  });
-}
+app.listen(PORT, () => {
+  console.log('Server running on port', PORT);
+});
 
 module.exports = app;
