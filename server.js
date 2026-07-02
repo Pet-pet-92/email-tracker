@@ -402,6 +402,34 @@ app.post('/api/settings', authenticateToken, async (req, res) => {
   }
 });
 
+app.post('/api/settings/test', authenticateToken, async (req, res) => {
+  const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
+  
+  if (!smtp_host || !smtp_port || !sender_email || !sender_password) {
+    return res.status(400).json({ error: 'All fields are required to test connection.' });
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: smtp_host,
+    port: parseInt(smtp_port),
+    secure: parseInt(smtp_secure) === 1,
+    auth: {
+      user: sender_email,
+      pass: sender_password
+    },
+    connectTimeout: 5000 // 5 second timeout so it doesn't hang forever
+  });
+
+  try {
+    // Verifies the SMTP connection parameters configuration
+    await transporter.verify();
+    res.json({ success: true, message: 'SMTP Endpoint Connection Successful! Your credentials are valid.' });
+  } catch (error) {
+    console.error('SMTP Test Error:', error.message);
+    res.status(500).json({ error: 'Connection Failed: ' + error.message });
+  }
+});
+
 app.post('/api/send-emails', authenticateToken, async (req, res) => {
   const { subject, template } = req.body;
   try {
@@ -560,6 +588,43 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     .status-clicked { color: #28a745; font-weight: bold; }
     .status-not-clicked { color: #dc3545; font-weight: bold; }
     .delete-btn { background: #dc3545; color: white; border: none; padding: 10px 25px; border-radius: 5px; cursor: pointer; }
+
+    /* Animated Toast Notification Container */
+#toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.toast {
+  background: #333;
+  color: white;
+  padding: 12px 24px;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  font-size: 14px;
+  font-weight: bold;
+  opacity: 0;
+  transform: translateY(20px);
+  animation: slideIn 0.3s forwards, fadeOut 0.3s 4s forwards;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 250px;
+}
+.toast.success { background: #28a745; border-left: 5px solid #1e7e34; }
+.toast.error { background: #dc3545; border-left: 5px solid #bd2130; }
+.toast.info { background: #007bff; border-left: 5px solid #0056b3; }
+
+@keyframes slideIn {
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeOut {
+  to { opacity: 0; transform: translateY(-20px); pointer-events: none; }
+}
   </style>
 </head>
 <body>
@@ -659,6 +724,25 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       if (tabId === 'settings-tab') loadSettings();
     }
 
+    // Global Toast Notification Trigger
+function showNotification(message, type = 'info') {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    document.body.appendChild(container);
+  }
+  
+  const toast = document.createElement('div');
+toast.className = 'toast ' + type; 
+toast.innerText = message;
+  
+  container.appendChild(toast);
+  
+  // Remove from DOM after animation completes
+  setTimeout(() => toast.remove(), 4500);
+}
+
     async function loadSettings() {
       var r = await fetch('/api/settings');
       var d = await r.json();
@@ -672,20 +756,28 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     }
 
     async function saveSettings(e) {
-      e.preventDefault();
-      var msg = document.getElementById('settingsMessage');
-      var payload = {
-        smtp_host: document.getElementById('smtpHost').value,
-        smtp_port: document.getElementById('smtpPort').value,
-        sender_email: document.getElementById('senderEmail').value,
-        sender_password: document.getElementById('senderPassword').value,
-        smtp_secure: document.getElementById('smtpSecure').value
-      };
-      var r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
-      var d = await r.json();
-      msg.textContent = r.ok ? d.message : d.error;
-      msg.style.color = r.ok ? '#28a745' : '#dc3545';
+  e.preventDefault();
+  var payload = {
+    smtp_host: document.getElementById('smtpHost').value,
+    smtp_port: document.getElementById('smtpPort').value,
+    sender_email: document.getElementById('senderEmail').value,
+    sender_password: document.getElementById('senderPassword').value,
+    smtp_secure: document.getElementById('smtpSecure').value
+  };
+  
+  try {
+    var r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    var d = await r.json();
+    
+    if (r.ok) {
+      showNotification(d.message, 'success');
+    } else {
+      showNotification(d.error || 'Failed to update settings', 'error');
     }
+  } catch (err) {
+    showNotification('Network connection error.', 'error');
+  }
+}
 
     async function testSettings() {
       var msg = document.getElementById('settingsMessage');
