@@ -379,26 +379,37 @@ app.post('/api/recipients/import', authenticateToken, upload.single('csvFile'), 
 
 app.get('/api/settings', authenticateToken, async (req, res) => {
   try {
-    const result = await query('SELECT * FROM settings WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [req.user.id]);
-    res.json(result.rows[0] || {});
+    const result = await pool.query('SELECT * FROM settings WHERE user_id = $1', [req.user.id]);
+    
+    if (result.rows.length === 0) {
+      // If this specific user hasn't saved anything yet, return blank fields
+      return res.json({ smtp_host: '', smtp_port: '', sender_email: '', smtp_secure: 0 });
+    }
+    
+    res.json(result.rows[0]);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch your settings profile.' });
   }
 });
 
 app.post('/api/settings', authenticateToken, async (req, res) => {
-  const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
+  const { smtp_host, smtp_port, sender_email, sender_password, smtp_secure } = req.body;
   try {
-    await query(`
-      INSERT INTO settings (user_id, smtp_host, smtp_port, smtp_secure, sender_email, sender_password, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
-      ON CONFLICT (user_id) DO UPDATE 
-      SET smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLUDED.smtp_port, smtp_secure = EXCLUDED.smtp_secure, 
-          sender_email = EXCLUDED.sender_email, sender_password = EXCLUDED.sender_password, updated_at = NOW()
-    `, [req.user.id, smtp_host, parseInt(smtp_port), parseInt(smtp_secure), sender_email, sender_password]);
-    res.json({ success: true, message: 'Settings updated successfully!' });
+    await pool.query(
+      `INSERT INTO settings (user_id, smtp_host, smtp_port, sender_email, sender_password, smtp_secure)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (user_id) 
+       DO UPDATE SET 
+          smtp_host = EXCLUDED.smtp_host, 
+          smtp_port = EXCLUDED.smtp_port, 
+          sender_email = EXCLUDED.sender_email, 
+          sender_password = EXCLUDED.sender_password, 
+          smtp_secure = EXCLUDED.smtp_secure`,
+      [req.user.id, smtp_host, parseInt(smtp_port), sender_email, sender_password, parseInt(smtp_secure)]
+    );
+    res.json({ success: true, message: 'Configuration parameters saved securely.' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to update settings: ' + error.message });
   }
 });
 
