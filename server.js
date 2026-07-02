@@ -16,17 +16,21 @@ const upload = multer({ storage: storage });
 // Serverless-optimized connection pool config
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 1, // Restricts per-instance connection exhaustion on Vercel
+  ssl: { 
+    rejectUnauthorized: false 
+  },
+  max: 1, 
+  idleTimeoutMillis: 10000, // Automatically close idle connections after 10s
+  connectionTimeoutMillis: 5000, // Fail fast (5s) instead of hanging for 5 mins
 });
 
-pool.connect((err) => {
+/* pool.connect((err) => {
   if (err) {
     console.error('Error connecting to PostgreSQL:', err.stack);
   } else {
     console.log('Connected to PostgreSQL!');
   }
-});
+});  */
 
 async function query(text, params) {
   const res = await pool.query(text, params);
