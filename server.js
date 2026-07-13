@@ -44,7 +44,7 @@ function escapeHTML(str) {
   );
 }
 
-// AUTHENTICATION MIDDLEWARE: Verifies who is making the request
+// AUTHENTICATION MIDDLEWARE
 function authenticateToken(req, res, next) {
   const token = req.cookies.token;
 
@@ -64,6 +64,33 @@ function authenticateToken(req, res, next) {
     if (req.path === '/dashboard') return res.redirect('/login');
     return res.status(403).json({ error: 'Invalid or expired session token.' });
   }
+}
+
+// ============================================
+// FIXED: GENERATE LINKS FUNCTION
+// ============================================
+function generateLinks(recipients, baseUrl) {
+  const results = [];
+  recipients.forEach(person => {
+    const uniqueId = crypto.randomBytes(16).toString('hex');
+    const base = baseUrl || process.env.BASE_URL || 'http://localhost:3000';
+    const link = base + '/click/' + uniqueId;
+
+    let name = person.name;
+    if (!name) {
+      name = person.email.split('@')[0];
+      name = name.replace(/[0-9]/g, '');
+      name = name.replace(/[._-]/g, ' ');
+      name = name.trim();
+      name = name.split(' ').map(word =>
+        word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+      ).join(' ');
+      if (!name) name = 'N/A';
+    }
+
+    results.push({ id: uniqueId, email: person.email, name: name, link: link });
+  });
+  return results;
 }
 
 // ============================================
@@ -226,33 +253,6 @@ app.get('/api/export/pdf', authenticateToken, async (req, res) => {
 });
 
 // ============================================
-// FIXED: GENERATE LINKS FUNCTION
-// ============================================
-function generateLinks(recipients, baseUrl) {
-  const results = [];
-  recipients.forEach(person => {
-    const uniqueId = crypto.randomBytes(16).toString('hex');
-    const base = baseUrl || process.env.BASE_URL || 'http://localhost:3000';
-    const link = base + '/click/' + uniqueId;
-
-    let name = person.name;
-    if (!name) {
-      name = person.email.split('@')[0];
-      name = name.replace(/[0-9]/g, '');
-      name = name.replace(/[._-]/g, ' ');
-      name = name.trim();
-      name = name.split(' ').map(word =>
-        word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
-      ).join(' ');
-      if (!name) name = 'N/A';
-    }
-
-    results.push({ id: uniqueId, email: person.email, name: name, link: link });
-  });
-  return results;
-}
-
-// ============================================
 // FIXED: SEND EMAILS WITH ATTACHMENTS
 // ============================================
 async function sendEmails(recipients, customSubject, customTemplate, userId, attachments) {
@@ -283,6 +283,41 @@ async function sendEmails(recipients, customSubject, customTemplate, userId, att
 <p>Or copy: {link}</p>
   `;
 
+  // Process attachments
+  let attachmentObjects = [];
+  if (attachments && attachments.length > 0) {
+    console.log('Processing ' + attachments.length + ' attachments');
+
+    for (const att of attachments) {
+      try {
+        let content = att.content;
+
+        // If content is a data URL, extract the base64 data
+        if (typeof content === 'string' && content.includes(';base64,')) {
+          const base64Data = content.split(';base64,')[1];
+          content = Buffer.from(base64Data, 'base64');
+        } else if (typeof content === 'string') {
+          // Try to decode as base64
+          content = Buffer.from(content, 'base64');
+        }
+
+        // Verify the content is valid
+        if (content && content.length > 0) {
+          attachmentObjects.push({
+            filename: att.filename || 'attachment',
+            content: content,
+            contentType: att.contentType || 'application/octet-stream'
+          });
+          console.log('Added attachment: ' + att.filename);
+        } else {
+          console.log('Skipping invalid attachment: ' + att.filename);
+        }
+      } catch (error) {
+        console.log('Error processing attachment ' + att.filename + ':', error.message);
+      }
+    }
+  }
+
   for (const person of recipients) {
     const existingResult = await query('SELECT id, link, name FROM recipients WHERE email = $1 AND user_id = $2', [person.email, userId]);
     const existingRecipient = existingResult.rows[0];
@@ -295,7 +330,6 @@ async function sendEmails(recipients, customSubject, customTemplate, userId, att
     const link = existingRecipient.link;
     const name = existingRecipient.name;
 
-    // Debug: Log the link
     console.log('Sending to', person.email, 'Link:', link);
 
     let htmlContent = template
@@ -309,9 +343,9 @@ async function sendEmails(recipients, customSubject, customTemplate, userId, att
       html: htmlContent
     };
 
-    // Add attachments if provided
-    if (attachments && attachments.length > 0) {
-      mailOptions.attachments = attachments;
+    if (attachmentObjects.length > 0) {
+      mailOptions.attachments = attachmentObjects;
+      console.log('Sending ' + attachmentObjects.length + ' attachments to ' + person.email);
     }
 
     try {
@@ -628,17 +662,7 @@ app.post('/api/send-emails', authenticateToken, async (req, res) => {
     const recipientsResult = await query('SELECT email, name FROM recipients WHERE user_id = $1', [req.user.id]);
     if (recipientsResult.rows.length === 0) return res.status(400).json({ error: 'No recipients found.' });
 
-    // Process attachments if provided
-    let attachmentObjects = [];
-    if (attachments && attachments.length > 0) {
-      attachmentObjects = attachments.map(att => ({
-        filename: att.filename,
-        content: att.content,
-        contentType: att.contentType || 'application/octet-stream'
-      }));
-    }
-
-    const results = await sendEmails(recipientsResult.rows, subject, template, req.user.id, attachmentObjects);
+    const results = await sendEmails(recipientsResult.rows, subject, template, req.user.id, attachments);
     res.json({ success: true, message: 'Emails dispatched.', results });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -777,30 +801,19 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     .filter-bar { display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
     .filter-bar select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 5px; }
     .btn { padding: 8px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; font-size: 14px; }
-    .btn:hover { background: #0056b3; }
-    .btn-danger { background: #dc3545; }
-    .btn-danger:hover { background: #c82333; }
-    .btn-success { background: #28a745; }
-    .btn-success:hover { background: #218838; }
-    .btn-warning { background: #ff9800; }
-    .btn-warning:hover { background: #e68900; }
-    .btn-secondary { background: #6c757d; }
-    .btn-secondary:hover { background: #5a6268; }
-    .btn-sm { padding: 6px 15px; font-size: 12px; }
     .summary { display: flex; gap: 20px; margin-bottom: 20px; }
     .summary-card { background: #f8f9fa; padding: 15px 25px; border-radius: 8px; flex: 1; text-align: center; }
     .summary-card .number { font-size: 32px; font-weight: bold; color: #007bff; }
     .summary-card .number.green { color: #28a745; }
     .summary-card .number.red { color: #dc3545; }
-    .add-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .add-form input { padding: 10px; border: 1px solid #ddd; border-radius: 5px; flex: 1; min-width: 200px; }
-    .settings-form input, .settings-form select { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
+    .add-form input { padding: 10px; border: 1px solid #ddd; border-radius: 5px; margin-right: 10px; }
+    .settings-form input { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 5px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
     th { background: #f8f9fa; }
     .status-clicked { color: #28a745; font-weight: bold; }
     .status-not-clicked { color: #dc3545; font-weight: bold; }
-    .no-results { text-align: center; padding: 40px; color: #999; }
+    .delete-btn { background: #dc3545; color: white; border: none; padding: 10px 25px; border-radius: 5px; cursor: pointer; }
     .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
     .export-section { background: #e8f5e9; padding: 10px; border-radius: 8px; margin-bottom: 15px; }
     .attachment-section { margin-top: 15px; padding-top: 15px; border-top: 1px solid #e9ecef; }
@@ -808,13 +821,50 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     .attachment-item input[type="file"] { flex: 1; }
     .attachment-item button { padding: 4px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
     .attachment-item button:hover { background: #c82333; }
+
+    /* Animated Toast Notification Container */
+    #toast-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .toast {
+      background: #333;
+      color: white;
+      padding: 12px 24px;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      font-size: 14px;
+      font-weight: bold;
+      opacity: 0;
+      transform: translateY(20px);
+      animation: slideIn 0.3s forwards, fadeOut 0.3s 4s forwards;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 250px;
+    }
+    .toast.success { background: #28a745; border-left: 5px solid #1e7e34; }
+    .toast.error { background: #dc3545; border-left: 5px solid #bd2130; }
+    .toast.info { background: #007bff; border-left: 5px solid #0056b3; }
+
+    @keyframes slideIn {
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeOut {
+      to { opacity: 0; transform: translateY(-20px); pointer-events: none; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header-bar">
       <h1>Campaign Hub</h1>
-      <a href="/api/auth/logout" class="btn btn-danger" style="font-weight:bold;">Logout Account</a>
+      <a href="/api/auth/logout" class="btn" style="background:#dc3545; font-weight:bold;">Logout Account</a>
     </div>
     <div class="tabs">
       <button class="tab active" onclick="showTab('dashboard-tab')">Dashboard</button>
@@ -844,7 +894,7 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
         <form class="add-form" onsubmit="addRecipient(event)">
           <input type="email" id="emailInput" placeholder="Email Address" required>
           <input type="text" id="nameInput" placeholder="Name">
-          <button type="submit" class="btn btn-success">Add</button>
+          <button type="submit" class="btn" style="background:#28a745;">Add</button>
           <span id="addMessage"></span>
         </form>
       </div>
@@ -858,15 +908,15 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       </div>
       <div class="card" style="background:#f8f9ff; border: 1px solid #007bff;">
         <h3>Execute Campaign Broadcast</h3>
-        <input type="text" id="emailSubject" value="Reminder to attend meeting" style="width:100%; padding:10px; margin-bottom:10px; border:1px solid #ddd; border-radius:4px;">
-        <textarea id="emailTemplate" rows="4" style="width:100%; padding:10px; border:1px solid #ddd; border-radius:4px;"><h2>Hello {name}!</h2><p><a href="{link}">Click Here</a></p></textarea>
+        <input type="text" id="emailSubject" value="Reminder to attend meeting" style="width:100%; padding:10px; margin-bottom:10px;">
+        <textarea id="emailTemplate" rows="4" style="width:100%; padding:10px;"><h2>Hello {name}!</h2><p><a href="{link}">Click Here</a></p></textarea>
 
         <div class="attachment-section">
           <h4>Attachments</h4>
           <div id="attachmentList">
             <div class="attachment-item">
               <input type="file" id="attachmentInput" multiple>
-              <button type="button" onclick="addAttachment()">Add File</button>
+              <button type="button" class="btn" onclick="addAttachment()">Add File</button>
             </div>
           </div>
           <div id="attachedFiles" style="margin-top:10px;"></div>
@@ -879,19 +929,19 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       <div class="card">
         <h3>Recipients Actions</h3>
         <div class="btn-group" style="margin-bottom:15px;">
-          <button onclick="selectAllRecipients()" class="btn btn-secondary">Select All</button>
-          <button onclick="deselectAllRecipients()" class="btn btn-secondary">Clear Selection</button>
-          <button onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" class="btn btn-danger">Delete Selected</button>
-          <button onclick="deleteAllRecipients()" class="btn btn-danger">Wipe All Data</button>
-          <button onclick="deleteAllSent()" class="btn btn-warning">Wipe Sent Entries</button>
+          <button onclick="selectAllRecipients()" class="btn" style="background:#6c757d;">Select All</button>
+          <button onclick="deselectAllRecipients()" class="btn" style="background:#6c757d;">Clear Selection</button>
+          <button onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" class="delete-btn">Delete Selected</button>
+          <button onclick="deleteAllRecipients()" class="delete-btn" style="opacity:0.6;">Wipe All Data</button>
+          <button onclick="deleteAllSent()" class="btn" style="background:#ff9800;">Wipe Sent Entries</button>
         </div>
 
         <div class="export-section">
           <strong>Export Data:</strong>
           <div class="btn-group">
-            <button onclick="exportData('csv')" class="btn btn-success btn-sm">CSV</button>
-            <button onclick="exportData('excel')" class="btn btn-success btn-sm">Excel</button>
-            <button onclick="exportData('pdf')" class="btn btn-success btn-sm">PDF</button>
+            <button onclick="exportData('csv')" class="btn" style="background:#28a745;">CSV</button>
+            <button onclick="exportData('excel')" class="btn" style="background:#007bff;">Excel</button>
+            <button onclick="exportData('pdf')" class="btn" style="background:#dc3545;">PDF</button>
           </div>
         </div>
 
@@ -907,11 +957,9 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
           <input type="number" id="smtpPort" placeholder="SMTP Port">
           <input type="email" id="senderEmail" placeholder="Sender Email Address">
           <input type="password" id="senderPassword" placeholder="App Password">
-          <select id="smtpSecure" style="width:100%; padding:10px; margin-bottom:15px; border:1px solid #ddd; border-radius:4px;"><option value="0">TLS (587)</option><option value="1">SSL (465)</option></select>
-          <div class="btn-group">
-            <button type="submit" class="btn">Save Configuration</button>
-            <button type="button" class="btn btn-success" onclick="testSettings()">Test Endpoint Connection</button>
-          </div>
+          <select id="smtpSecure" style="width:100%; padding:10px; margin-bottom:15px;"><option value="0">TLS (587)</option><option value="1">SSL (465)</option></select>
+          <button type="submit" class="btn">Save Configuration</button>
+          <button type="button" class="btn" style="background:#28a745;" onclick="testSettings()">Test Endpoint Connection</button>
           <div id="settingsMessage" style="margin-top:10px; font-weight:bold;"></div>
         </form>
       </div>
@@ -938,20 +986,26 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       if (input.files.length === 0) return;
 
       var container = document.getElementById('attachedFiles');
+
       for (var i = 0; i < input.files.length; i++) {
         var file = input.files[i];
         var reader = new FileReader();
+
         reader.onload = function(e) {
+          var fileData = e.target.result;
+
           attachments.push({
             filename: file.name,
-            content: e.target.result.split(',')[1],
-            contentType: file.type
+            content: fileData,
+            contentType: file.type || 'application/octet-stream'
           });
+
           var div = document.createElement('div');
           div.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:5px 10px;background:#f8f9fa;margin:5px 0;border-radius:4px;';
           div.innerHTML = '<span>' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)</span><button onclick="this.parentElement.remove(); removeAttachment(\\'' + file.name + '\\')" style="background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;padding:2px 10px;">X</button>';
           container.appendChild(div);
         };
+
         reader.readAsDataURL(file);
       }
       input.value = '';
@@ -967,6 +1021,22 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
 
     function exportData(format) {
       window.location.href = '/api/export/' + format;
+    }
+
+    function showNotification(message, type) {
+      var container = document.getElementById('toast-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        document.body.appendChild(container);
+      }
+
+      var toast = document.createElement('div');
+      toast.className = 'toast ' + (type || 'info');
+      toast.innerText = message;
+
+      container.appendChild(toast);
+      setTimeout(function() { toast.remove(); }, 4500);
     }
 
     async function loadSettings() {
@@ -993,9 +1063,11 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
 
       var r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
       var d = await r.json();
-      var msg = document.getElementById('settingsMessage');
-      msg.textContent = d.message || d.error;
-      msg.style.color = r.ok ? '#28a745' : '#dc3545';
+      if (r.ok) {
+        showNotification(d.message, 'success');
+      } else {
+        showNotification(d.error || 'Failed to update settings', 'error');
+      }
     }
 
     async function testSettings() {
@@ -1093,22 +1165,44 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
 
     async function sendEmails() {
       var btn = document.getElementById('sendBtn');
-      btn.disabled = true; btn.textContent = 'Processing...';
+      btn.disabled = true;
+      btn.textContent = 'Processing...';
+
+      var attachmentData = attachments.map(function(att) {
+        return {
+          filename: att.filename,
+          content: att.content,
+          contentType: att.contentType
+        };
+      });
+
       var payload = {
         subject: document.getElementById('emailSubject').value,
         template: document.getElementById('emailTemplate').value,
-        attachments: getAttachments()
+        attachments: attachmentData
       };
+
       var r = await fetch('/api/send-emails', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
       });
-      if(r.ok) { alert('Broadcast processing complete.'); window.location.reload(); }
-      btn.disabled = false; btn.textContent = 'Send Emails';
+
+      var result = await r.json();
+      if (r.ok) {
+        alert('Broadcast processing complete.');
+        window.location.reload();
+      } else {
+        alert('Error: ' + (result.error || 'Unknown error'));
+      }
+      btn.disabled = false;
+      btn.textContent = 'Send Emails';
     }
 
-    document.addEventListener('DOMContentLoaded', () => { loadRecipients(); loadSettings(); });
+    document.addEventListener('DOMContentLoaded', function() {
+      loadRecipients();
+      loadSettings();
+    });
   </script>
 </body>
 </html>
