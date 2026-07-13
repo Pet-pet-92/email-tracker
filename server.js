@@ -8,6 +8,8 @@ const Papa = require('papaparse');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
+const XLSX = require('xlsx');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 
@@ -24,7 +26,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key-change-this-in-pr
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
-  max: 1, 
+  max: 1,
   idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 5000,
 });
@@ -37,15 +39,15 @@ async function query(text, params) {
 // Security sanitization to protect against Cross-Site Scripting (XSS)
 function escapeHTML(str) {
   if (!str) return '';
-  return str.replace(/[&<>'"]/g, 
+  return str.replace(/[&<>'"]/g,
     tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
   );
 }
 
-// AUTHENTICATION MIDDLEWARE: Verifies who is making the request
+// AUTHENTICATION MIDDLEWARE
 function authenticateToken(req, res, next) {
   const token = req.cookies.token;
-  
+
   if (!token) {
     if (req.path === '/dashboard') {
       return res.redirect('/login');
@@ -55,7 +57,7 @@ function authenticateToken(req, res, next) {
 
   try {
     const verified = jwt.verify(token, JWT_SECRET);
-    req.user = verified; 
+    req.user = verified;
     next();
   } catch (error) {
     res.clearCookie('token');
@@ -64,39 +66,203 @@ function authenticateToken(req, res, next) {
   }
 }
 
+// ============================================
+// FIXED: GENERATE LINKS FUNCTION
+// ============================================
 function generateLinks(recipients, baseUrl) {
   const results = [];
   recipients.forEach(person => {
     const uniqueId = crypto.randomBytes(16).toString('hex');
-    const base = baseUrl || 'http://localhost:3000';
-    const link = `${baseUrl}/click/${uniqueId}`;
-    
+    const base = baseUrl || process.env.BASE_URL || 'http://localhost:3000';
+    const link = base + '/click/' + uniqueId;
+
     let name = person.name;
     if (!name) {
       name = person.email.split('@')[0];
       name = name.replace(/[0-9]/g, '');
       name = name.replace(/[._-]/g, ' ');
       name = name.trim();
-      name = name.split(' ').map(word => 
+      name = name.split(' ').map(word =>
         word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
       ).join(' ');
       if (!name) name = 'N/A';
     }
-    
+
     results.push({ id: uniqueId, email: person.email, name: name, link: link });
   });
   return results;
 }
 
-// Sequential, rate-limited email distribution function to prevent SMTP blocking
-async function sendEmails(recipients, customSubject, customTemplate, userId) {
+// ============================================
+// EXPORT FUNCTIONS
+// ============================================
+
+// Helper function to get export data
+async function getExportData(userId) {
+  const result = await query(`
+    SELECT 
+      r.email,
+      r.name,
+      r.sent_at,
+      COUNT(c.id) as click_count,
+      MAX(c.timestamp) as last_click
+    FROM recipients r
+    LEFT JOIN clicks c ON r.id = c.recipient_id
+    WHERE r.user_id = $1
+    GROUP BY r.id, r.email, r.name, r.sent_at
+    ORDER BY r.sent_at DESC
+  `, [userId]);
+  return result.rows;
+}
+
+// EXPORT CSV
+app.get('/api/export/csv', authenticateToken, async (req, res) => {
+  try {
+    const rows = await getExportData(req.user.id);
+
+    let csv = 'Email,Name,Sent At,Clicks,Last Click\n';
+
+    rows.forEach(row => {
+      const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Not sent';
+      const lastClick = row.last_click ? new Date(row.last_click).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Never';
+      csv += `"${row.email}","${row.name || ''}","${sentAt}",${row.click_count},"${lastClick}"\n`;
+    });
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename=recipients_export.csv');
+    res.send(csv);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// EXPORT EXCEL (XLSX)
+app.get('/api/export/excel', authenticateToken, async (req, res) => {
+  try {
+    const rows = await getExportData(req.user.id);
+
+    const excelData = rows.map(row => ({
+      'Email': row.email,
+      'Name': row.name || '',
+      'Sent At': row.sent_at ? new Date(row.sent_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Not sent',
+      'Clicks': row.click_count,
+      'Last Click': row.last_click ? new Date(row.last_click).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Never'
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(excelData);
+    XLSX.utils.book_append_sheet(wb, ws, 'Recipients');
+
+    const colWidths = [
+      { wch: 30 },
+      { wch: 20 },
+      { wch: 25 },
+      { wch: 10 },
+      { wch: 25 }
+    ];
+    ws['!cols'] = colWidths;
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=recipients_export.xlsx');
+    res.send(buffer);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// EXPORT PDF
+app.get('/api/export/pdf', authenticateToken, async (req, res) => {
+  try {
+    const rows = await getExportData(req.user.id);
+
+    const doc = new PDFDocument({ margin: 30 });
+    const buffers = [];
+
+    doc.on('data', buffers.push.bind(buffers));
+    doc.on('end', () => {
+      const pdfData = Buffer.concat(buffers);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename=recipients_export.pdf');
+      res.send(pdfData);
+    });
+
+    // Title
+    doc.fontSize(20).text('Recipients Export', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12).text('Generated: ' + new Date().toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }), { align: 'center' });
+    doc.moveDown();
+    doc.text('Total Recipients: ' + rows.length, { align: 'center' });
+    doc.moveDown(2);
+
+    // Table headers
+    const tableTop = doc.y;
+    const col1 = 30;
+    const col2 = 180;
+    const col3 = 330;
+    const col4 = 460;
+    const col5 = 520;
+
+    doc.fontSize(10).font('Helvetica-Bold');
+    doc.text('Email', col1, tableTop);
+    doc.text('Name', col2, tableTop);
+    doc.text('Sent At', col3, tableTop);
+    doc.text('Clicks', col4, tableTop);
+    doc.text('Last Click', col5, tableTop);
+
+    doc.moveTo(30, tableTop + 15).lineTo(580, tableTop + 15).stroke();
+
+    let y = tableTop + 25;
+    doc.font('Helvetica');
+
+    rows.forEach((row, index) => {
+      if (y > 750) {
+        doc.addPage();
+        y = 50;
+        doc.font('Helvetica-Bold');
+        doc.text('Email', col1, y);
+        doc.text('Name', col2, y);
+        doc.text('Sent At', col3, y);
+        doc.text('Clicks', col4, y);
+        doc.text('Last Click', col5, y);
+        doc.moveTo(30, y + 15).lineTo(580, y + 15).stroke();
+        y += 25;
+        doc.font('Helvetica');
+      }
+
+      const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Not sent';
+      const lastClick = row.last_click ? new Date(row.last_click).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi' }) : 'Never';
+
+      doc.text(row.email, col1, y);
+      doc.text(row.name || '', col2, y);
+      doc.text(sentAt, col3, y);
+      doc.text(String(row.click_count), col4, y);
+      doc.text(lastClick, col5, y);
+
+      y += 18;
+    });
+
+    doc.moveDown(2);
+    doc.fontSize(8).text('Generated by Email Tracker System', { align: 'center' });
+
+    doc.end();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// FIXED: SEND EMAILS WITH ATTACHMENTS
+// ============================================
+async function sendEmails(recipients, customSubject, customTemplate, userId, attachments) {
   const settingsResult = await query('SELECT * FROM settings WHERE user_id = $1 ORDER BY id DESC LIMIT 1', [userId]);
   const settings = settingsResult.rows[0];
-  
+
   if (!settings || !settings.sender_email || !settings.sender_password) {
     throw new Error('Email settings not configured.');
   }
-  
+
   const transporter = nodemailer.createTransport({
     host: settings.smtp_host,
     port: settings.smtp_port,
@@ -109,6 +275,7 @@ async function sendEmails(recipients, customSubject, customTemplate, userId) {
 
   const sentEmails = [];
   const subject = customSubject || 'Reminder to attend meeting';
+
   let template = customTemplate || `
 <h2>Hello {name}!</h2>
 <p>Click the link below:</p>
@@ -116,17 +283,59 @@ async function sendEmails(recipients, customSubject, customTemplate, userId) {
 <p>Or copy: {link}</p>
   `;
 
+  // Process attachments
+  let attachmentObjects = [];
+  if (attachments && attachments.length > 0) {
+    console.log('Processing ' + attachments.length + ' attachments');
+
+    for (const att of attachments) {
+      try {
+        let content = att.content;
+
+        // If content is a data URL, extract the base64 data
+        if (typeof content === 'string' && content.includes(';base64,')) {
+          const base64Data = content.split(';base64,')[1];
+          content = Buffer.from(base64Data, 'base64');
+        } else if (typeof content === 'string') {
+          // Try to decode as base64
+          content = Buffer.from(content, 'base64');
+        }
+
+        // Verify the content is valid
+        if (content && content.length > 0) {
+          attachmentObjects.push({
+            filename: att.filename || 'attachment',
+            content: content,
+            contentType: att.contentType || 'application/octet-stream'
+          });
+          console.log('Added attachment: ' + att.filename);
+        } else {
+          console.log('Skipping invalid attachment: ' + att.filename);
+        }
+      } catch (error) {
+        console.log('Error processing attachment ' + att.filename + ':', error.message);
+      }
+    }
+  }
+
   for (const person of recipients) {
     const existingResult = await query('SELECT id, link, name FROM recipients WHERE email = $1 AND user_id = $2', [person.email, userId]);
     const existingRecipient = existingResult.rows[0];
-    
+
     if (!existingRecipient) {
       sentEmails.push({ email: person.email, status: 'failed', error: 'Recipient not found' });
       continue;
     }
-    
-    let htmlContent = template.replace(/{name}/g, existingRecipient.name).replace(/{link}/g, existingRecipient.link);
-    
+
+    const link = existingRecipient.link;
+    const name = existingRecipient.name;
+
+    console.log('Sending to', person.email, 'Link:', link);
+
+    let htmlContent = template
+      .replace(/{name}/g, name)
+      .replace(/{link}/g, link);
+
     const mailOptions = {
       from: settings.sender_email,
       to: person.email,
@@ -134,12 +343,17 @@ async function sendEmails(recipients, customSubject, customTemplate, userId) {
       html: htmlContent
     };
 
+    if (attachmentObjects.length > 0) {
+      mailOptions.attachments = attachmentObjects;
+      console.log('Sending ' + attachmentObjects.length + ' attachments to ' + person.email);
+    }
+
     try {
       await transporter.sendMail(mailOptions);
       await query('UPDATE recipients SET sent_at = NOW() WHERE email = $1 AND user_id = $2', [person.email, userId]);
       sentEmails.push({ email: person.email, status: 'sent' });
       console.log('Email sent to', person.email);
-      
+
       await new Promise(resolve => setTimeout(resolve, 200));
     } catch (error) {
       console.error('Failed to send to', person.email, error.message);
@@ -256,7 +470,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '24h' });
-    
+
     res.cookie('token', token, { httpOnly: true, secure: true, sameSite: 'strict' });
     res.redirect('/dashboard');
   } catch (error) {
@@ -310,13 +524,13 @@ app.get('/api/recipients', authenticateToken, async (req, res) => {
 app.post('/api/recipients', authenticateToken, async (req, res) => {
   const { email, name } = req.body;
   if (!email) return res.status(400).json({ error: 'Email is required' });
-  
+
   try {
     const existing = await query('SELECT * FROM recipients WHERE email = $1 AND user_id = $2', [email, req.user.id]);
     if (existing.rows.length > 0) {
       return res.status(400).json({ error: 'Email already exists in your account records.' });
     }
-    
+
     const uniqueId = crypto.randomBytes(16).toString('hex');
     const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
     const link = baseUrl + '/click/' + uniqueId;
@@ -327,12 +541,12 @@ app.post('/api/recipients', authenticateToken, async (req, res) => {
       finalName = finalName.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
       if (!finalName) finalName = 'N/A';
     }
-    
+
     await query(
       'INSERT INTO recipients (id, user_id, email, name, link, sent_at) VALUES ($1, $2, $3, $4, $5, NULL)',
       [uniqueId, req.user.id, email, finalName, link]
     );
-    
+
     res.json({ success: true, message: 'Recipient added successfully!', email: email, name: finalName });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -341,11 +555,11 @@ app.post('/api/recipients', authenticateToken, async (req, res) => {
 
 app.post('/api/recipients/import', authenticateToken, upload.single('csvFile'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  
+
   try {
     const csvString = req.file.buffer.toString('utf8');
     const result = Papa.parse(csvString, { header: true, skipEmptyLines: true, trimHeaders: true });
-    
+
     const results = [];
     result.data.forEach((row) => {
       const emailKey = Object.keys(row).find(key => key.toLowerCase().trim() === 'email');
@@ -354,9 +568,9 @@ app.post('/api/recipients/import', authenticateToken, upload.single('csvFile'), 
         results.push({ email: row[emailKey].trim(), name: nameKey ? row[nameKey].trim() : '' });
       }
     });
-    
+
     if (results.length === 0) return res.status(400).json({ error: 'No valid emails found.' });
-    
+
     let saved = 0;
     const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
 
@@ -371,7 +585,7 @@ app.post('/api/recipients/import', authenticateToken, upload.single('csvFile'), 
       );
       saved++;
     }
-    res.json({ success: true, message: `Imported ${saved} records successfully.` });
+    res.json({ success: true, message: 'Imported ' + saved + ' records successfully.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -380,12 +594,11 @@ app.post('/api/recipients/import', authenticateToken, upload.single('csvFile'), 
 app.get('/api/settings', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM settings WHERE user_id = $1', [req.user.id]);
-    
+
     if (result.rows.length === 0) {
-      // If this specific user hasn't saved anything yet, return blank fields
       return res.json({ smtp_host: '', smtp_port: '', sender_email: '', smtp_secure: 0 });
     }
-    
+
     res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to fetch your settings profile.' });
@@ -398,12 +611,12 @@ app.post('/api/settings', authenticateToken, async (req, res) => {
     await pool.query(
       `INSERT INTO settings (user_id, smtp_host, smtp_port, sender_email, sender_password, smtp_secure)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (user_id) 
-       DO UPDATE SET 
-          smtp_host = EXCLUDED.smtp_host, 
-          smtp_port = EXCLUDED.smtp_port, 
-          sender_email = EXCLUDED.sender_email, 
-          sender_password = EXCLUDED.sender_password, 
+       ON CONFLICT (user_id)
+       DO UPDATE SET
+          smtp_host = EXCLUDED.smtp_host,
+          smtp_port = EXCLUDED.smtp_port,
+          sender_email = EXCLUDED.sender_email,
+          sender_password = EXCLUDED.sender_password,
           smtp_secure = EXCLUDED.smtp_secure`,
       [req.user.id, smtp_host, parseInt(smtp_port), sender_email, sender_password, parseInt(smtp_secure)]
     );
@@ -415,7 +628,7 @@ app.post('/api/settings', authenticateToken, async (req, res) => {
 
 app.post('/api/settings/test', authenticateToken, async (req, res) => {
   const { smtp_host, smtp_port, smtp_secure, sender_email, sender_password } = req.body;
-  
+
   if (!smtp_host || !smtp_port || !sender_email || !sender_password) {
     return res.status(400).json({ error: 'All fields are required to test connection.' });
   }
@@ -428,11 +641,10 @@ app.post('/api/settings/test', authenticateToken, async (req, res) => {
       user: sender_email,
       pass: sender_password
     },
-    connectTimeout: 5000 // 5 second timeout so it doesn't hang forever
+    connectTimeout: 5000
   });
 
   try {
-    // Verifies the SMTP connection parameters configuration
     await transporter.verify();
     res.json({ success: true, message: 'SMTP Endpoint Connection Successful! Your credentials are valid.' });
   } catch (error) {
@@ -441,13 +653,16 @@ app.post('/api/settings/test', authenticateToken, async (req, res) => {
   }
 });
 
+// ============================================
+// FIXED: SEND EMAILS WITH ATTACHMENTS SUPPORT
+// ============================================
 app.post('/api/send-emails', authenticateToken, async (req, res) => {
-  const { subject, template } = req.body;
+  const { subject, template, attachments } = req.body;
   try {
     const recipientsResult = await query('SELECT email, name FROM recipients WHERE user_id = $1', [req.user.id]);
     if (recipientsResult.rows.length === 0) return res.status(400).json({ error: 'No recipients found.' });
-    
-    const results = await sendEmails(recipientsResult.rows, subject, template, req.user.id);
+
+    const results = await sendEmails(recipientsResult.rows, subject, template, req.user.id, attachments);
     res.json({ success: true, message: 'Emails dispatched.', results });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -466,7 +681,7 @@ app.post('/api/recipients/bulk-delete', authenticateToken, async (req, res) => {
   try {
     await query('DELETE FROM clicks WHERE email = ANY($1) AND user_id = $2', [emails, req.user.id]);
     const result = await query('DELETE FROM recipients WHERE email = ANY($1) AND user_id = $2', [emails, req.user.id]);
-    res.json({ success: true, message: `Successfully deleted ${result.rowCount} recipient(s).` });
+    res.json({ success: true, message: 'Successfully deleted ' + result.rowCount + ' recipient(s).' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -503,17 +718,17 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const statusFilter = req.query.status || 'all';
   const dateFilter = req.query.date || 'all';
-  
+
   let whereClause = '';
   let dateCondition = '';
-  
+
   if (statusFilter === 'clicked') whereClause = 'HAVING COUNT(c.id) > 0';
   else if (statusFilter === 'not-clicked') whereClause = 'HAVING COUNT(c.id) = 0';
-  
+
   if (dateFilter === 'today') dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE";
   else if (dateFilter === 'yesterday') dateCondition = "AND DATE(r.sent_at) = CURRENT_DATE - INTERVAL '1 day'";
   else if (dateFilter === 'week') dateCondition = "AND DATE(r.sent_at) >= CURRENT_DATE - INTERVAL '7 days'";
-  
+
   const queryText = `
     SELECT r.email, r.name, r.sent_at, COUNT(c.id) as click_count, MAX(c.timestamp) as last_click
     FROM recipients r
@@ -523,33 +738,33 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     ${whereClause}
     ORDER BY r.sent_at DESC
   `;
-  
+
   try {
     const rowsResult = await query(queryText, [userId]);
     const rows = rowsResult.rows;
-    
+
     const totalSent = rows.length;
     let totalClicked = 0;
     let totalNotClicked = 0;
     rows.forEach(r => { if (parseInt(r.click_count) > 0) totalClicked++; else totalNotClicked++; });
-    
+
     const statusOptions = `
       <option value="all" ${statusFilter === 'all' ? 'selected' : ''}>All</option>
       <option value="clicked" ${statusFilter === 'clicked' ? 'selected' : ''}>Clicked</option>
       <option value="not-clicked" ${statusFilter === 'not-clicked' ? 'selected' : ''}>Not Clicked</option>
     `;
-    
+
     const dateOptions = `
       <option value="all" ${dateFilter === 'all' ? 'selected' : ''}>All Time</option>
       <option value="today" ${dateFilter === 'today' ? 'selected' : ''}>Today</option>
       <option value="yesterday" ${dateFilter === 'yesterday' ? 'selected' : ''}>Yesterday</option>
       <option value="week" ${dateFilter === 'week' ? 'selected' : ''}>Last 7 Days</option>
     `;
-    
-    let tableRows = rows.length === 0 
-      ? '<div class="no-results"><p>No recipients found.</p></div>' 
-      : `<table><tr><th>Status</th><th>Email</th><th>Name</th><th>Sent At</th><th>Clicks</th><th>Last Click</th></tr>`;
-      
+
+    let tableRows = rows.length === 0
+      ? '<div class="no-results"><p>No recipients found.</p></div>'
+      : '<table><tr><th>Status</th><th>Email</th><th>Name</th><th>Sent At</th><th>Clicks</th><th>Last Click</th></tr>';
+
     if (rows.length > 0) {
       rows.forEach(row => {
         const sentAt = row.sent_at ? new Date(row.sent_at).toLocaleString() : 'Not sent yet';
@@ -566,7 +781,7 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       });
       tableRows += '</table>';
     }
-    
+
     res.send(`
 <!DOCTYPE html>
 <html>
@@ -599,43 +814,50 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
     .status-clicked { color: #28a745; font-weight: bold; }
     .status-not-clicked { color: #dc3545; font-weight: bold; }
     .delete-btn { background: #dc3545; color: white; border: none; padding: 10px 25px; border-radius: 5px; cursor: pointer; }
+    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+    .export-section { background: #e8f5e9; padding: 10px; border-radius: 8px; margin-bottom: 15px; }
+    .attachment-section { margin-top: 15px; padding-top: 15px; border-top: 1px solid #e9ecef; }
+    .attachment-item { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+    .attachment-item input[type="file"] { flex: 1; }
+    .attachment-item button { padding: 4px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .attachment-item button:hover { background: #c82333; }
 
     /* Animated Toast Notification Container */
-#toast-container {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  z-index: 10000;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.toast {
-  background: #333;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  font-size: 14px;
-  font-weight: bold;
-  opacity: 0;
-  transform: translateY(20px);
-  animation: slideIn 0.3s forwards, fadeOut 0.3s 4s forwards;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 250px;
-}
-.toast.success { background: #28a745; border-left: 5px solid #1e7e34; }
-.toast.error { background: #dc3545; border-left: 5px solid #bd2130; }
-.toast.info { background: #007bff; border-left: 5px solid #0056b3; }
+    #toast-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .toast {
+      background: #333;
+      color: white;
+      padding: 12px 24px;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      font-size: 14px;
+      font-weight: bold;
+      opacity: 0;
+      transform: translateY(20px);
+      animation: slideIn 0.3s forwards, fadeOut 0.3s 4s forwards;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 250px;
+    }
+    .toast.success { background: #28a745; border-left: 5px solid #1e7e34; }
+    .toast.error { background: #dc3545; border-left: 5px solid #bd2130; }
+    .toast.info { background: #007bff; border-left: 5px solid #0056b3; }
 
-@keyframes slideIn {
-  to { opacity: 1; transform: translateY(0); }
-}
-@keyframes fadeOut {
-  to { opacity: 0; transform: translateY(-20px); pointer-events: none; }
-}
+    @keyframes slideIn {
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeOut {
+      to { opacity: 0; transform: translateY(-20px); pointer-events: none; }
+    }
   </style>
 </head>
 <body>
@@ -649,7 +871,7 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       <button class="tab" onclick="showTab('manage-tab')">Manage Recipients</button>
       <button class="tab" onclick="showTab('settings-tab')">Settings</button>
     </div>
-    
+
     <div id="dashboard-tab" class="tab-content active">
       <div class="card">
         <form method="GET" action="/dashboard" class="filter-bar">
@@ -665,7 +887,7 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       </div>
       <div class="card">${tableRows}</div>
     </div>
-    
+
     <div id="manage-tab" class="tab-content">
       <div class="card">
         <h3>Add Recipient Manually</h3>
@@ -688,23 +910,45 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
         <h3>Execute Campaign Broadcast</h3>
         <input type="text" id="emailSubject" value="Reminder to attend meeting" style="width:100%; padding:10px; margin-bottom:10px;">
         <textarea id="emailTemplate" rows="4" style="width:100%; padding:10px;"><h2>Hello {name}!</h2><p><a href="{link}">Click Here</a></p></textarea>
+
+        <div class="attachment-section">
+          <h4>Attachments</h4>
+          <div id="attachmentList">
+            <div class="attachment-item">
+              <input type="file" id="attachmentInput" multiple>
+              <button type="button" class="btn" onclick="addAttachment()">Add File</button>
+            </div>
+          </div>
+          <div id="attachedFiles" style="margin-top:10px;"></div>
+        </div>
+
         <button onclick="sendEmails()" id="sendBtn" class="btn" style="margin-top:10px; width:200px;">Send Emails</button>
         <span id="sendStatus"></span>
         <div id="sendProgress"></div>
       </div>
       <div class="card">
         <h3>Recipients Actions</h3>
-        <div style="margin-bottom:15px; display:flex; gap:10px;">
+        <div class="btn-group" style="margin-bottom:15px;">
           <button onclick="selectAllRecipients()" class="btn" style="background:#6c757d;">Select All</button>
           <button onclick="deselectAllRecipients()" class="btn" style="background:#6c757d;">Clear Selection</button>
           <button onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" class="delete-btn">Delete Selected</button>
           <button onclick="deleteAllRecipients()" class="delete-btn" style="opacity:0.6;">Wipe All Data</button>
           <button onclick="deleteAllSent()" class="btn" style="background:#ff9800;">Wipe Sent Entries</button>
         </div>
+
+        <div class="export-section">
+          <strong>Export Data:</strong>
+          <div class="btn-group">
+            <button onclick="exportData('csv')" class="btn" style="background:#28a745;">CSV</button>
+            <button onclick="exportData('excel')" class="btn" style="background:#007bff;">Excel</button>
+            <button onclick="exportData('pdf')" class="btn" style="background:#dc3545;">PDF</button>
+          </div>
+        </div>
+
         <div id="recipientList">Loading list...</div>
       </div>
     </div>
-    
+
     <div id="settings-tab" class="tab-content">
       <div class="card">
         <h3>User SMTP Settings Profile</h3>
@@ -723,6 +967,8 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
   </div>
 
   <script>
+    var attachments = [];
+
     function showTab(tabId) {
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -735,24 +981,63 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       if (tabId === 'settings-tab') loadSettings();
     }
 
-    // Global Toast Notification Trigger
-function showNotification(message, type = 'info') {
-  let container = document.getElementById('toast-container');
-  if (!container) {
-    container = document.createElement('div');
-    container.id = 'toast-container';
-    document.body.appendChild(container);
-  }
-  
-  const toast = document.createElement('div');
-toast.className = 'toast ' + type; 
-toast.innerText = message;
-  
-  container.appendChild(toast);
-  
-  // Remove from DOM after animation completes
-  setTimeout(() => toast.remove(), 4500);
-}
+    function addAttachment() {
+      var input = document.getElementById('attachmentInput');
+      if (input.files.length === 0) return;
+
+      var container = document.getElementById('attachedFiles');
+
+      for (var i = 0; i < input.files.length; i++) {
+        var file = input.files[i];
+        var reader = new FileReader();
+
+        reader.onload = function(e) {
+          var fileData = e.target.result;
+
+          attachments.push({
+            filename: file.name,
+            content: fileData,
+            contentType: file.type || 'application/octet-stream'
+          });
+
+          var div = document.createElement('div');
+          div.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:5px 10px;background:#f8f9fa;margin:5px 0;border-radius:4px;';
+          div.innerHTML = '<span>' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)</span><button onclick="this.parentElement.remove(); removeAttachment(\\'' + file.name + '\\')" style="background:#dc3545;color:white;border:none;border-radius:4px;cursor:pointer;padding:2px 10px;">X</button>';
+          container.appendChild(div);
+        };
+
+        reader.readAsDataURL(file);
+      }
+      input.value = '';
+    }
+
+    function removeAttachment(filename) {
+      attachments = attachments.filter(function(a) { return a.filename !== filename; });
+    }
+
+    function getAttachments() {
+      return attachments;
+    }
+
+    function exportData(format) {
+      window.location.href = '/api/export/' + format;
+    }
+
+    function showNotification(message, type) {
+      var container = document.getElementById('toast-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        document.body.appendChild(container);
+      }
+
+      var toast = document.createElement('div');
+      toast.className = 'toast ' + (type || 'info');
+      toast.innerText = message;
+
+      container.appendChild(toast);
+      setTimeout(function() { toast.remove(); }, 4500);
+    }
 
     async function loadSettings() {
       var r = await fetch('/api/settings');
@@ -767,28 +1052,23 @@ toast.innerText = message;
     }
 
     async function saveSettings(e) {
-  e.preventDefault();
-  var payload = {
-    smtp_host: document.getElementById('smtpHost').value,
-    smtp_port: document.getElementById('smtpPort').value,
-    sender_email: document.getElementById('senderEmail').value,
-    sender_password: document.getElementById('senderPassword').value,
-    smtp_secure: document.getElementById('smtpSecure').value
-  };
-  
-  try {
-    var r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
-    var d = await r.json();
-    
-    if (r.ok) {
-      showNotification(d.message, 'success');
-    } else {
-      showNotification(d.error || 'Failed to update settings', 'error');
+      e.preventDefault();
+      var payload = {
+        smtp_host: document.getElementById('smtpHost').value,
+        smtp_port: document.getElementById('smtpPort').value,
+        sender_email: document.getElementById('senderEmail').value,
+        sender_password: document.getElementById('senderPassword').value,
+        smtp_secure: document.getElementById('smtpSecure').value
+      };
+
+      var r = await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+      var d = await r.json();
+      if (r.ok) {
+        showNotification(d.message, 'success');
+      } else {
+        showNotification(d.error || 'Failed to update settings', 'error');
+      }
     }
-  } catch (err) {
-    showNotification('Network connection error.', 'error');
-  }
-}
 
     async function testSettings() {
       var msg = document.getElementById('settingsMessage');
@@ -831,13 +1111,13 @@ toast.innerText = message;
       var r = await fetch('/api/recipients');
       var d = await r.json();
       if(!d || d.length === 0) { container.innerHTML = '<p>List completely empty.</p>'; return; }
-      
+
       var html = '<table><tr><th><input type="checkbox" id="masterCheck" onchange="toggleAll()"></th><th>Email</th><th>Name</th><th>Status</th></tr>';
-      
+
       d.forEach(function(row) {
         var statusText = row.sent_at ? 'Sent' : 'Pending';
         var statusColor = row.sent_at ? '#28a745' : '#ff9800';
-        
+
         html += '<tr>';
         html += '<td><input type="checkbox" class="rec-check" value="' + row.email + '"></td>';
         html += '<td>' + row.email + '</td>';
@@ -845,7 +1125,7 @@ toast.innerText = message;
         html += '<td style="color:' + statusColor + '">' + statusText + '</td>';
         html += '</tr>';
       });
-      
+
       html += '</table>';
       container.innerHTML = html;
     }
@@ -885,17 +1165,44 @@ toast.innerText = message;
 
     async function sendEmails() {
       var btn = document.getElementById('sendBtn');
-      btn.disabled = true; btn.textContent = 'Processing...';
+      btn.disabled = true;
+      btn.textContent = 'Processing...';
+
+      var attachmentData = attachments.map(function(att) {
+        return {
+          filename: att.filename,
+          content: att.content,
+          contentType: att.contentType
+        };
+      });
+
+      var payload = {
+        subject: document.getElementById('emailSubject').value,
+        template: document.getElementById('emailTemplate').value,
+        attachments: attachmentData
+      };
+
       var r = await fetch('/api/send-emails', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ subject: document.getElementById('emailSubject').value, template: document.getElementById('emailTemplate').value })
+        body:JSON.stringify(payload)
       });
-      if(r.ok) { alert('Broadcast processing complete.'); window.location.reload(); }
-      btn.disabled = false; btn.textContent = 'Send Emails';
+
+      var result = await r.json();
+      if (r.ok) {
+        alert('Broadcast processing complete.');
+        window.location.reload();
+      } else {
+        alert('Error: ' + (result.error || 'Unknown error'));
+      }
+      btn.disabled = false;
+      btn.textContent = 'Send Emails';
     }
 
-    document.addEventListener('DOMContentLoaded', () => { loadRecipients(); loadSettings(); });
+    document.addEventListener('DOMContentLoaded', function() {
+      loadRecipients();
+      loadSettings();
+    });
   </script>
 </body>
 </html>
@@ -906,11 +1213,18 @@ toast.innerText = message;
 });
 
 app.get('/clicked-link-page', (req, res) => {
+  const email = req.query.email || 'Guest';
+  const name = req.query.name || 'there';
   res.send(`
-    <!DOCTYPE html><html><body style="font-family:Arial;text-align:center;padding:50px;">
-      <h1>SECURITY COMPLIANCE TEST AUDIT CHECKPOINT REACHED</h1>
-      <p>This engagement simulator logged an untrusted click entry flag targeting: \${escapeHTML(req.query.email || 'Unknown Client Domain Context')}</p>
-    </body></html>
+    <!DOCTYPE html>
+    <html>
+    <head><title>Thank You</title></head>
+    <body style="font-family:Arial;text-align:center;padding:50px;">
+      <h1>THIS WAS A SECURITY TEST ${name}!</h1>
+      <p>You have failed The Security test.</p>
+      <p>Please be more cautious.</p>
+    </body>
+    </html>
   `);
 });
 
