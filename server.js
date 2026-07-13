@@ -73,7 +73,7 @@ function generateLinks(recipients, baseUrl) {
   const results = [];
   recipients.forEach(person => {
     const uniqueId = crypto.randomBytes(16).toString('hex');
-    const base = baseUrl || process.env.BASE_URL || 'http://localhost:3000';
+    const base = baseUrl || 'https://prepared-purple-zmobzvzj-dp2t09e24sra.edgeone.dev';
     const link = base + '/click/' + uniqueId;
 
     let name = person.name;
