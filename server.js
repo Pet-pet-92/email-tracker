@@ -505,7 +505,9 @@ app.get('/click/:id', async (req, res) => {
       [id, row.user_id, row.email, userAgent, ip]
     );
 
-    res.redirect('/clicked-link-page?email=' + encodeURIComponent(row.email) + '&name=' + encodeURIComponent(row.name));
+   /* res.redirect('/clicked-link-page?email=' + encodeURIComponent(row.email) + '&name=' + encodeURIComponent(row.name));*/
+    
+res.redirect('https://prepared-purple-zmobzvzj-dp2t09e24sra.edgeone.dev');
   } catch (error) {
     console.error('Error in tracking:', error);
     res.status(500).send('Server error');
