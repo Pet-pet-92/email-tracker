@@ -450,7 +450,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     await query(
       'INSERT INTO settings (user_id, smtp_host, smtp_port, smtp_secure, sender_email, sender_password) VALUES ($1, $2, $3, $4, $5, $6)',
-      [result.rows[0].id, 'smtp.gmail.com', 587, 0, 'placeholder@gmail.com', 'password']
+      [result.rows[0].id, 'smtp.gmail.com', 587, 0, '', '']
     );
 
     res.send('<body style="font-family:Arial;text-align:center;padding:50px;"><h3>Registration successful! <a href="/login">Click here to login</a></h3></body>');
@@ -931,11 +931,10 @@ app.get('/dashboard', authenticateToken, async (req, res) => {
       <div class="card">
         <h3>Recipients Actions</h3>
         <div class="btn-group" style="margin-bottom:15px;">
-          <button onclick="selectAllRecipients()" class="btn" style="background:#6c757d;">Select All</button>
-          <button onclick="deselectAllRecipients()" class="btn" style="background:#6c757d;">Clear Selection</button>
+           
           <button onclick="deleteSelectedRecipients()" id="deleteSelectedBtn" class="delete-btn">Delete Selected</button>
-          <button onclick="deleteAllRecipients()" class="delete-btn" style="opacity:0.6;">Wipe All Data</button>
-          <button onclick="deleteAllSent()" class="btn" style="background:#ff9800;">Wipe Sent Entries</button>
+          <button onclick="deleteAllRecipients()" class="delete-btn" style="opacity:0.6;">Delete All </button>
+          <button onclick="deleteAllSent()" class="btn" style="background:#ff9800;">Delete Sent Entries</button>
         </div>
 
         <div class="export-section">
