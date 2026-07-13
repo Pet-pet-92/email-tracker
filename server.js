@@ -69,7 +69,7 @@ function generateLinks(recipients, baseUrl) {
   recipients.forEach(person => {
     const uniqueId = crypto.randomBytes(16).toString('hex');
     const base = baseUrl || 'http://localhost:3000';
-    const link = base + '/click/' + uniqueId;
+    const link = `${baseUrl}/click/${uniqueId}`;
     
     let name = person.name;
     if (!name) {
